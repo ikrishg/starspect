@@ -1,0 +1,258 @@
+{
+  "dialect": "sqlite",
+  "id": "20e653f0-d227-4efa-80d8-57ead1ad8515",
+  "prevIds": [
+    "0d0482a7-abde-4325-a22e-e2da655caa36"
+  ],
+  "version": "7",
+  "ddl": [
+    {
+      "name": "repositories",
+      "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "table": "repositories",
+      "entityType": "columns"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "repositories_pk",
+      "table": "repositories",
+      "entityType": "pks"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "owner",
+      "table": "repositories",
+      "entityType": "columns"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "repo",
+      "table": "repositories",
+      "entityType": "columns"
+    },
+    {
+      "name": "repository_stargazers",
+      "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "repository_id",
+      "table": "repository_stargazers",
+      "entityType": "columns"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "stargazer_id",
+      "table": "repository_stargazers",
+      "entityType": "columns"
+    },
+    {
+      "columns": [
+        "repository_id",
+        "stargazer_id"
+      ],
+      "nameExplicit": false,
+      "name": "repository_stargazers_repository_id_stargazer_id_pk",
+      "table": "repository_stargazers",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        {
+          "value": "stargazer_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "repository_stargazers_stargazer_id_idx",
+      "table": "repository_stargazers",
+      "entityType": "indexes"
+    },
+    {
+      "columns": [
+        "repository_id"
+      ],
+      "tableTo": "repositories",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "repository_stargazers_repository_id_repositories_id_fk",
+      "table": "repository_stargazers",
+      "entityType": "fks"
+    },
+    {
+      "columns": [
+        "stargazer_id"
+      ],
+      "tableTo": "stargazers",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "repository_stargazers_stargazer_id_stargazers_id_fk",
+      "table": "repository_stargazers",
+      "entityType": "fks"
+    },
+    {
+      "name": "stargazers",
+      "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "table": "stargazers",
+      "entityType": "columns"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "stargazers_pk",
+      "table": "stargazers",
+      "entityType": "pks"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "username",
+      "table": "stargazers",
+      "entityType": "columns"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "n_dates",
+      "table": "stargazers",
+      "entityType": "columns"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "n_repos",
+      "table": "stargazers",
+      "entityType": "columns"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "n_orgs",
+      "table": "stargazers",
+      "entityType": "columns"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "total_actions",
+      "table": "stargazers",
+      "entityType": "columns"
+    },
+    {
+      "name": "tokens",
+      "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "user_id",
+      "table": "tokens",
+      "entityType": "columns"
+    },
+    {
+      "columns": [
+        "user_id"
+      ],
+      "nameExplicit": false,
+      "name": "tokens_pk",
+      "table": "tokens",
+      "entityType": "pks"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "username",
+      "table": "tokens",
+      "entityType": "columns"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "github_token",
+      "table": "tokens",
+      "entityType": "columns"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "last_token_use_at",
+      "table": "tokens",
+      "entityType": "columns"
+    }
+  ],
+  "renames": []
+}

@@ -1,38 +1,28 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "server",
+  "name": "starspect",
   "main": "src/index.ts",
-  "compatibility_date": "2026-04-25"
-  // "compatibility_flags": [
-  //   "nodejs_compat"
-  // ],
-  // "vars": {
-  //   "MY_VAR": "my-variable"
-  // },
-  // "kv_namespaces": [
-  //   {
-  //     "binding": "MY_KV_NAMESPACE",
-  //     "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-  //   }
-  // ],
-  // "r2_buckets": [
-  //   {
-  //     "binding": "MY_BUCKET",
-  //     "bucket_name": "my-bucket"
-  //   }
-  // ],
-  // "d1_databases": [
-  //   {
-  //     "binding": "MY_DB",
-  //     "database_name": "my-database",
-  //     "database_id": ""
-  //   }
-  // ],
-  // "ai": {
-  //   "binding": "AI"
-  // },
-  // "observability": {
-  //   "enabled": true,
-  //   "head_sampling_rate": 1
-  // }
+  "compatibility_date": "2026-04-25",
+  "kv_namespaces": [
+    {
+      "binding": "repo_cache",
+      "id": "0f0cdf1a07c24ccdaa393e3e1523ef07"
+    },
+    {
+      "binding": "user_cache",
+      "id": "8f536ffe282b4df282072abb8d646d46"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "db",
+      "database_name": "starspect",
+      "database_id": "49825963-f7f8-40c9-a190-d9ee342a53a2",
+      "migrations_dir": "drizzle"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
 }

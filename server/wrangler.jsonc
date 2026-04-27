@@ -3,16 +3,6 @@
   "name": "starspect",
   "main": "src/index.ts",
   "compatibility_date": "2026-04-25",
-  "kv_namespaces": [
-    {
-      "binding": "repo_cache",
-      "id": "0f0cdf1a07c24ccdaa393e3e1523ef07"
-    },
-    {
-      "binding": "user_cache",
-      "id": "8f536ffe282b4df282072abb8d646d46"
-    }
-  ],
   "d1_databases": [
     {
       "binding": "db",

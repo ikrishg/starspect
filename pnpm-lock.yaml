@@ -19,6 +19,9 @@ importers:
 
   server:
     dependencies:
+      '@octokit/plugin-throttling':
+        specifier: ^11.0.3
+        version: 11.0.5(@octokit/core@7.0.8)
       '@octokit/rest':
         specifier: ^22.0.1
         version: 22.0.1
@@ -31,7 +34,13 @@ importers:
       hono:
         specifier: ^4.12.15
         version: 4.12.15
+      lodash.chunk:
+        specifier: ^4.2.0
+        version: 4.2.0
     devDependencies:
+      '@types/lodash.chunk':
+        specifier: ^4.2.9
+        version: 4.2.9
       '@types/node':
         specifier: ^25.6.0
         version: 25.9.9
@@ -658,6 +667,9 @@ packages:
   '@octokit/openapi-types@27.0.0':
     resolution: {integrity: sha512-whrdktVs1h6gtR+09+QsNk2+FO+49j6ga1c55YZudfEG+oKJVvJLQi3zkOm5JjiUXAagWK2tI2kTGKJ2Ys7MGA==}
 
+  '@octokit/openapi-types@28.0.0':
+    resolution: {integrity: sha512-0rFyLuyHvIj6uuZWuDslxkowFYdPXoNIkeAv4b27dzm2Tf4vGWXnPsMcxs7d65kLdMERgP3wc1AEPlqMz8e1cQ==}
+
   '@octokit/openapi-types@29.0.1':
     resolution: {integrity: sha512-9qWOMFNxxLokERcms42rU0PTLqQmVs7g5E41TI4mCOxmpFayD1rfC7XxOL55cG9MBZLFlC31BrR37myMKardwg==}
 
@@ -679,6 +691,12 @@ packages:
     peerDependencies:
       '@octokit/core': '>=6'
 
+  '@octokit/plugin-throttling@11.0.5':
+    resolution: {integrity: sha512-LIdrkrUv+DWbKeg/49rGuFJ3SU0d3hUS+B4MhNZLepBoNUFXms8Ic9edJjrlx+zycqJHjrMRudVpVb/bAXM2Lw==}
+    engines: {node: '>= 20'}
+    peerDependencies:
+      '@octokit/core': ^7.0.0
+
   '@octokit/request-error@7.1.2':
     resolution: {integrity: sha512-XZRuT3xZ84D3gYErI1DZvhJ33dCWVV6uzBtWkaBB4TvA/L6eOeTZodxLFVB44bBEEo3vEx7y00UfX1tBLrtLRg==}
     engines: {node: '>= 20'}
@@ -693,6 +711,9 @@ packages:
 
   '@octokit/types@16.0.0':
     resolution: {integrity: sha512-sKq+9r1Mm4efXW1FCk7hFSeJo4QKreL/tTbR0rz/qx/r1Oa2VV83LTA/H/MuCOX7uCIJmQVRKBcbmWoySjAnSg==}
+
+  '@octokit/types@17.0.0':
+    resolution: {integrity: sha512-ByP1v7YL5SMveFPP7+sj0/ZuWCOOg/Chs4NafOMpq6WNIM/hdGY0S7C0TCGDBWu1aGmOxmUIhMx3cO+IdwYZ1Q==}
 
   '@octokit/types@18.0.0':
     resolution: {integrity: sha512-l6bAF43PNxkJp6g+W4PjoUSSkxHomXw2nOum5CTftJz1NlV3vu93NImgOYtLf6CbBUb5j+fiuzW0PPQ5JTSvZA==}
@@ -839,6 +860,12 @@ packages:
   '@types/har-format@1.2.16':
     resolution: {integrity: sha512-fluxdy7ryD3MV6h8pTfTYpy/xQzCFC7m89nOH9y94cNqJ1mDIDPut7MnRHI3F6qRmh/cT2fUjG1MLdCNb4hE9A==}
 
+  '@types/lodash.chunk@4.2.9':
+    resolution: {integrity: sha512-Z9VtFUSnmT0No/QymqfG9AGbfOA4O5qB/uyP89xeZBqDAsKsB4gQFTqt7d0pHjbsTwtQ4yZObQVHuKlSOhIJ5Q==}
+
+  '@types/lodash@4.17.26':
+    resolution: {integrity: sha512-48NWfiY6oNcKOh47Z4h+sIvwcQR91h6KPhaYKgeMIrkT2jV82Gy90SErj60vW8jQbeMSOSbhIv3bZ7JoqPPVhA==}
+
   '@types/minimatch@3.0.5':
     resolution: {integrity: sha512-Klz949h02Gz2uZCMGwDUSDS1YBlTdDDgbWHi+81l29tQALUtvz4rAYi5uoVhE5Lagoq6DeqAUlbrHvW/mXDgdQ==}
 
@@ -934,6 +961,9 @@ packages:
   boolbase@2.0.0:
     resolution: {integrity: sha512-DkVaaQHymRhpYEYo9x1oo7Q7B0Y6KJUsjm3c9eTyFDby4MHLBTwZ6ZDWBel5zrYxj1WsZgC5oLpiz+93MluXeA==}
     engines: {node: '>=20.19.0'}
+
+  bottleneck@2.19.5:
+    resolution: {integrity: sha512-VHiNCbI1lKdl44tGrhNfU3lup0Tj/ZBMJB5/2ZbNXRCPuRCO7ed2mgcK4r17y+KB2EfuYuRaVlwNbAeaWGSpbw==}
 
   boxen@8.0.1:
     resolution: {integrity: sha512-F3PH5k5juxom4xktynS7MoFY+NUWH5LC4CnH11YB8NPew+HLpmBLCybSAEyb2F+4pRXhuhWqFesoQd6DAyc2hw==}
@@ -1722,6 +1752,9 @@ packages:
   local-pkg@1.2.1:
     resolution: {integrity: sha512-++gUqRDEvcnN6Zhqrr+y/CkVEHhlrR96vZn3nZZPYzMcBUyBtTKzB9NadClFIsIVSsu+3i9tfk/erqy9kAmt7Q==}
     engines: {node: '>=14'}
+
+  lodash.chunk@4.2.0:
+    resolution: {integrity: sha512-ZzydJKfUHJwHa+hF5X66zLFCBrWn5GeF28OHEr4WVWtNDXlQ/IjWKPBiikqKo2ne0+v6JgCgJ0GzJp8k8bHC7w==}
 
   lodash.includes@4.3.0:
     resolution: {integrity: sha512-W3Bx6mdkRTGtlJISOvVD/lbqjTlPPUDTMnlXZFnVwi9NKJ6tiAk6LVdlhZMm17VZisqhKcgzpO5Wz91PCt5b0w==}
@@ -2816,6 +2849,8 @@ snapshots:
 
   '@octokit/openapi-types@27.0.0': {}
 
+  '@octokit/openapi-types@28.0.0': {}
+
   '@octokit/openapi-types@29.0.1': {}
 
   '@octokit/plugin-paginate-rest@14.0.0(@octokit/core@7.0.8)':
@@ -2831,6 +2866,12 @@ snapshots:
     dependencies:
       '@octokit/core': 7.0.8
       '@octokit/types': 16.0.0
+
+  '@octokit/plugin-throttling@11.0.5(@octokit/core@7.0.8)':
+    dependencies:
+      '@octokit/core': 7.0.8
+      '@octokit/types': 17.0.0
+      bottleneck: 2.19.5
 
   '@octokit/request-error@7.1.2':
     dependencies:
@@ -2855,6 +2896,10 @@ snapshots:
   '@octokit/types@16.0.0':
     dependencies:
       '@octokit/openapi-types': 27.0.0
+
+  '@octokit/types@17.0.0':
+    dependencies:
+      '@octokit/openapi-types': 28.0.0
 
   '@octokit/types@18.0.0':
     dependencies:
@@ -2947,6 +2992,12 @@ snapshots:
 
   '@types/har-format@1.2.16': {}
 
+  '@types/lodash.chunk@4.2.9':
+    dependencies:
+      '@types/lodash': 4.17.26
+
+  '@types/lodash@4.17.26': {}
+
   '@types/minimatch@3.0.5': {}
 
   '@types/node@25.9.9':
@@ -3029,6 +3080,8 @@ snapshots:
   bluebird@3.7.2: {}
 
   boolbase@2.0.0: {}
+
+  bottleneck@2.19.5: {}
 
   boxen@8.0.1:
     dependencies:
@@ -3653,6 +3706,8 @@ snapshots:
       mlly: 1.8.2
       pkg-types: 2.3.3
       quansync: 0.2.11
+
+  lodash.chunk@4.2.0: {}
 
   lodash.includes@4.3.0: {}
 

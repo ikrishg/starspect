@@ -1,5 +1,5 @@
-import { Context } from "hono"
-import { getCookie } from "hono/cookie"
+import { Context } from 'hono'
+import { getCookie } from 'hono/cookie'
 
 export const sessionCookie = 'starspect_session'
 

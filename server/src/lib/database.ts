@@ -2,10 +2,9 @@ import { drizzle } from "drizzle-orm/d1"
 import * as schema from '../db/schema'
 import { asc, and, inArray, lt, gt } from 'drizzle-orm'
 import { eq } from "drizzle-orm"
+import type { Drizzle } from '../db'
 
-export async function selectTokens(d1: D1Database, needed: number) {
-  const db = drizzle(d1, { schema })
-
+export async function selectTokens(db: Drizzle, needed: number) {
   const tokens = await db.select({
     token: schema.tokens.token
   })
@@ -22,9 +21,7 @@ export async function selectTokens(d1: D1Database, needed: number) {
   return tokens.map((token) => token.token)
 }
 
-export async function fetchExistingUsers(d1: D1Database, ...usernames: string[]) {
-  const db = drizzle(d1, { schema })
-
+export async function fetchExistingUsers(db: Drizzle, ...usernames: string[]) {
   const users = await db.select()
     .from(schema.stargazers)
     .where(
@@ -39,8 +36,7 @@ export async function fetchExistingUsers(d1: D1Database, ...usernames: string[])
   return new Map(users.map((user) => [user.username, user]))
 }
 
-export async function fetchExistingRepository(d1: D1Database, name: string) {
-  const db = drizzle(d1, { schema })
+export async function fetchExistingRepository(db: Drizzle, name: string) {
 
   const repository = await db.select()
     .from(schema.repositories)
@@ -61,9 +57,7 @@ export async function fetchExistingRepository(d1: D1Database, name: string) {
   return repository
 }
 
-export async function createRepositoryRelation(d1: D1Database, name: string, ...usernames: string[]) {
-  const db = drizzle(d1, { schema })
-
+export async function createRepositoryRelation(db: Drizzle, name: string, ...usernames: string[]) {
   await db.insert(schema.stargazersToRepos).values(usernames.map((username) => ({
     stargazerUsername: username,
     repositoryId: name,

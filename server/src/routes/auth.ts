@@ -1,10 +1,10 @@
 import { Context, Hono } from 'hono'
 import type { AppBindings } from '../env'
-import { deleteCookie, getCookie, setCookie, setSignedCookie } from 'hono/cookie'
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { drizzle } from 'drizzle-orm/d1'
-import { sessionCookie, serializeSession } from '../auth/util'
 import * as schema from '../db/schema'
 import packageJson from '../../../package.json'
+import { encrypt } from '../lib/auth'
 
 const scope = 'public_repo read:user'
 
@@ -157,26 +157,36 @@ auth.get('/callback', async (c) => {
     })
   }
 
-  const sessionMaxAge = 60 * 60 * 24 * 14
-  const exp = Math.floor(Date.now() / 1000) + sessionMaxAge
-  await setSignedCookie(
-    c,
-    sessionCookie,
-    serializeSession({ sub: String(id), login, exp }),
-    c.env.SESSION_SECRET,
-    {
-      path: '/',
-      httpOnly: true,
-      secure: true,
-      sameSite: 'Lax',
-      maxAge: sessionMaxAge,
-    },
-  )
+  const expiresAt = new Date(Date.now() /** one year */ + 1000 * 60 * 60 * 24 * 365).getTime()
+
+  const tokenContent = [
+    crypto.randomUUID(),
+    login,
+    expiresAt,
+  ].join(':')
+
+  const encrypted = await encrypt(tokenContent, c.env.SESSION_SECRET)
+  const token = `${encrypted.iv}.${encrypted.data}`
+
+  setCookie(c, 'starspect_session', token, {
+    path: '/',
+    secure: true,
+    httpOnly: true,
+    sameSite: 'Lax',
+    maxAge: Math.floor((expiresAt - Date.now()) / 1000),
+  })
+
+  c.env.sessions.put(token, expiresAt.toString())
 
   deleteCookie(c, oauthStateCookie, { path: '/', secure: true, httpOnly: true })
   deleteCookie(c, oauthCodeVerifierCookie, { path: '/', secure: true, httpOnly: true })
 
-  return c.redirect(`${new URL(c.req.url).origin}/auth/success`)
+  return c.json({
+    token: token,
+    expiresAt: expiresAt,
+    login: login,
+    starAction: starAction === 'true',
+  })
 })
 
 export { auth }

@@ -3,6 +3,12 @@
   "name": "starspect",
   "main": "src/index.ts",
   "compatibility_date": "2026-04-25",
+  "kv_namespaces": [
+    {
+      "binding": "sessions",
+      "id": "1c4ee8ca3fd8427dac601fe37ac573be"
+    }
+  ],
   "d1_databases": [
     {
       "binding": "db",

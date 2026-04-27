@@ -3,6 +3,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import * as schema from '../db/schema';
 import { scoreStargazer } from './scoring';
 import { HTTPException } from 'hono/http-exception';
+import type { Drizzle } from '../db';
 
 // const StarspectOctokit = Octokit.plugin(throttling)
 
@@ -67,7 +68,7 @@ export async function fetchUser(d1: D1Database, token: string, username: string)
   return insert
 }
 
-export async function fetchRepository(d1: D1Database, name: string, token: string) {
+export async function fetchRepository(db: Drizzle, name: string, token: string) {
   const octokit = new Octokit({
     auth: token
   })

@@ -181,7 +181,8 @@ auth.get('/callback', async (c) => {
     maxAge: Math.floor((expiresAt - Date.now()) / 1000),
   })
 
-  await c.env.sessions.put(token, expiresAt.toString())
+  const sessionTtlSeconds = Math.max(1, Math.floor((expiresAt - Date.now()) / 1000))
+  await c.env.sessions.put(token, expiresAt.toString(), { expirationTtl: sessionTtlSeconds })
 
   deleteCookie(c, oauthStateCookie, { path: '/', secure: true, httpOnly: true })
   deleteCookie(c, oauthCodeVerifierCookie, { path: '/', secure: true, httpOnly: true })

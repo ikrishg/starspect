@@ -41,9 +41,6 @@ importers:
         specifier: ^4.2.0
         version: 4.2.0
     devDependencies:
-      '@cloudflare/workers-types':
-        specifier: ^4.20251014.0
-        version: 4.20260702.1
       '@types/lodash.chunk':
         specifier: ^4.2.9
         version: 4.2.9
@@ -53,6 +50,9 @@ importers:
       drizzle-kit:
         specifier: 0.31.11
         version: 0.31.11
+      miniflare:
+        specifier: ^4.20260424.0
+        version: 4.20260424.0
       tsx:
         specifier: ^4.20.5
         version: 4.23.15
@@ -2808,7 +2808,8 @@ snapshots:
   '@cloudflare/workerd-windows-64@1.20260424.1':
     optional: true
 
-  '@cloudflare/workers-types@4.20260702.1': {}
+  '@cloudflare/workers-types@4.20260702.1':
+    optional: true
 
   '@cspotcode/source-map-support@0.8.1':
     dependencies:
@@ -3267,7 +3268,7 @@ snapshots:
   '@jridgewell/trace-mapping@0.3.9':
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
-      '@jridgewell/sourcemap-codec': 1.5.5
+      '@jridgewell/sourcemap-codec': 1.6.0
 
   '@octokit/auth-token@6.0.0': {}
 

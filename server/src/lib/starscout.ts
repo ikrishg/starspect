@@ -1,19 +1,20 @@
 import { HTTPException } from 'hono/http-exception'
 import type { AppBindings } from '../env'
+import * as github from './github'
 import {
-  fetchStargazers,
-  fetchUser,
   GITHUB_HTTP_CALLS_PER_USER,
   MAX_STARGAZERS_TO_LIST,
   STARGAZERS_PER_LIST_PAGE,
-  verifyRepositoryExists,
   WORKER_SUBREQUEST_BUDGET,
 } from './github'
 import {
   countAvailableTokens,
   createRepositoryRelation,
+  ensureRepositoryRow,
   fetchExistingRepository,
   fetchExistingUsers,
+  fetchPartialRepository,
+  fetchScoredStargazersForRepository,
   releaseReservedTokens,
   saveRepositoryScore,
   selectTokens,
@@ -40,7 +41,24 @@ export const MAX_NEW_USERS_PER_REQUEST = Math.max(
   ),
 )
 
-export async function score(env: AppBindings, owner: string, repo: string) {
+export type ScoreGithubDeps = {
+  verifyRepositoryExists: typeof github.verifyRepositoryExists
+  fetchStargazers: typeof github.fetchStargazers
+  fetchUser: typeof github.fetchUser
+}
+
+const defaultGithubDeps: ScoreGithubDeps = {
+  verifyRepositoryExists: github.verifyRepositoryExists,
+  fetchStargazers: github.fetchStargazers,
+  fetchUser: github.fetchUser,
+}
+
+export async function score(
+  env: AppBindings,
+  owner: string,
+  repo: string,
+  deps: ScoreGithubDeps = defaultGithubDeps,
+) {
   const db = drizzle(env.db, { schema })
   const name = `${owner}/${repo}`
 
@@ -48,6 +66,11 @@ export async function score(env: AppBindings, owner: string, repo: string) {
   if (existingRepository) {
     return existingRepository[0]
   }
+
+  const partialRepository = await fetchPartialRepository(db, name)
+  const previouslyScored = partialRepository
+    ? await fetchScoredStargazersForRepository(db, name)
+    : []
 
   const baseReserved = await selectTokens(db, 1, env.SESSION_SECRET)
   if (baseReserved.length === 0) {
@@ -59,10 +82,22 @@ export async function score(env: AppBindings, owner: string, repo: string) {
   const reservedTokens = [...baseReserved]
 
   try {
-    await verifyRepositoryExists(owner, repo, baseReserved[0].plaintext)
+    await deps.verifyRepositoryExists(owner, repo, baseReserved[0].plaintext)
+    await ensureRepositoryRow(db, name)
 
-    const stargazers = await fetchStargazers(owner, repo, baseReserved[0].plaintext)
-    const precomputed = await fetchExistingUsers(db, ...stargazers)
+    const stargazers = await deps.fetchStargazers(owner, repo, baseReserved[0].plaintext)
+    const listedCount = stargazers.length
+    const scoredUsernames = new Set(previouslyScored.map((user) => user.username))
+
+    const precomputed = await fetchExistingUsers(
+      db,
+      ...stargazers.filter((login) => !scoredUsernames.has(login)),
+    )
+
+    for (const user of previouslyScored) {
+      precomputed.set(user.username, user)
+    }
+
     const newUsers = stargazers
       .filter((stargazer) => !precomputed.has(stargazer))
       .slice(0, MAX_NEW_USERS_PER_REQUEST)
@@ -88,6 +123,7 @@ export async function score(env: AppBindings, owner: string, repo: string) {
       })
     }
 
+    let hadFetchFailures = false
     const fetchedUsers =
       chunks.length === 0
         ? []
@@ -96,29 +132,48 @@ export async function score(env: AppBindings, owner: string, repo: string) {
               chunks.map(async (userChunk, index) => {
                 const settled = await Promise.allSettled(
                   userChunk.map((user) =>
-                    fetchUser(env.db, reservedTokens[index].plaintext, user),
+                    deps.fetchUser(env.db, reservedTokens[index].plaintext, user),
                   ),
                 )
 
-                return settled.flatMap((result) =>
-                  result.status === 'fulfilled' && result.value ? [result.value] : [],
-                )
+                return settled.flatMap((result) => {
+                  if (result.status === 'fulfilled') {
+                    if (result.value) {
+                      return [result.value]
+                    }
+                    return []
+                  }
+                  hadFetchFailures = true
+                  return []
+                })
               }),
             )
           ).flat()
 
     const users = [...precomputed.values(), ...fetchedUsers]
+    const uniqueUsers = [...new Map(users.map((user) => [user.username, user])).values()]
+    const scoredCount = uniqueUsers.length
 
-    if (users.length > 0) {
-      await createRepositoryRelation(db, name, ...users.map((user) => user.username))
+    const isPartial =
+      hadFetchFailures || listedCount >= MAX_STARGAZERS_TO_LIST || scoredCount < listedCount
+
+    if (fetchedUsers.length > 0) {
+      await createRepositoryRelation(db, name, ...fetchedUsers.map((user) => user.username))
     }
 
-    const repositoryStats = scoreRepository(users)
-    return saveRepositoryScore(db, name, repositoryStats)
+    if (scoredCount === 0) {
+      throw new HTTPException(503, {
+        message: 'Could not score any stargazers for this repository yet',
+      })
+    }
+
+    const repositoryStats = scoreRepository(uniqueUsers, listedCount)
+    return saveRepositoryScore(db, name, {
+      ...repositoryStats,
+      is_partial: isPartial,
+    })
   } catch (error) {
-    if (error instanceof HTTPException && error.status === 429) {
-      await releaseReservedTokens(db, reservedTokens)
-    }
+    await releaseReservedTokens(db, reservedTokens)
     throw error
   }
 }

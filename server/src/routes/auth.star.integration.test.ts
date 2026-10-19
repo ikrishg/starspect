@@ -16,6 +16,17 @@ import { STARSPECT_STAR_TARGET } from '../lib/github-star'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const sessionSecret = btoa(String.fromCharCode(...new Uint8Array(32).fill(4)))
 
+const sessionKvBinding = (sessionKv: Map<string, string>): KVNamespace =>
+  ({
+    get: async (key: string) => sessionKv.get(key) ?? null,
+    put: async (key: string, value: string) => {
+      sessionKv.set(key, value)
+    },
+    delete: async (key: string) => {
+      sessionKv.delete(key)
+    },
+  }) as unknown as KVNamespace
+
 const bindings = (db: D1Database, sessions: KVNamespace) => ({
   db,
   sessions,
@@ -80,10 +91,7 @@ const starPost = async (
       headers,
       body,
     }),
-    bindings(db, {
-      get: async (key: string) => sessionKv.get(key) ?? null,
-      put: async () => undefined,
-    } as unknown as KVNamespace),
+    bindings(db, sessionKvBinding(sessionKv)),
   )
 }
 
@@ -140,12 +148,7 @@ describe('auth star consent', () => {
           },
         },
       ),
-      bindings(db, {
-        get: async () => null,
-        put: async (key: string, value: string) => {
-          sessionKv.set(key, value)
-        },
-      } as unknown as KVNamespace),
+      bindings(db, sessionKvBinding(sessionKv)),
     )
 
     assert.equal(callbackResponse.status, 200)
@@ -229,12 +232,7 @@ describe('auth star consent', () => {
           Cookie: 'oauth_state=state-value; oauth_code_verifier=verifier-value',
         },
       }),
-      bindings(db, {
-        get: async () => null,
-        put: async (key: string, value: string) => {
-          sessionKv.set(key, value)
-        },
-      } as unknown as KVNamespace),
+      bindings(db, sessionKvBinding(sessionKv)),
     )
     assert.equal(callbackResponse.status, 200)
 

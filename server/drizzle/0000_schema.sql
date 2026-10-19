@@ -2,8 +2,7 @@ CREATE TABLE `tokens` (
 	`user_id` text PRIMARY KEY NOT NULL,
 	`username` text NOT NULL,
 	`github_token` text NOT NULL,
-	`last_token_use_at` integer NOT NULL,
-	`token_unusable` integer DEFAULT 0 NOT NULL
+	`last_token_use_at` integer NOT NULL
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `tokens_username_unique` ON `tokens` (`username`);
@@ -13,12 +12,10 @@ CREATE UNIQUE INDEX `tokens_github_token_unique` ON `tokens` (`github_token`);
 CREATE TABLE `repositories` (
 	`name` text PRIMARY KEY NOT NULL,
 	`n_stars` integer,
-	`n_scored_stars` integer,
 	`n_fake_stars` integer,
 	`n_low_activity` integer,
 	`n_activity_cluster` integer,
 	`score` integer,
-	`is_partial` integer DEFAULT 0 NOT NULL,
 	`checked_at` integer
 );
 --> statement-breakpoint

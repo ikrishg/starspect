@@ -7,6 +7,7 @@ const TOKEN_COOLDOWN_SECONDS = 60 * 60
 const D1_MAX_BOUND_PARAMS = 100
 const USER_LOOKUP_BATCH_SIZE = D1_MAX_BOUND_PARAMS - 1
 const RELATION_INSERT_BATCH_SIZE = Math.floor(D1_MAX_BOUND_PARAMS / 2)
+const SELECT_TOKEN_MAX_ATTEMPTS = 50
 export const FULL_REPOSITORY_CACHE_MS = 1000 * 60 * 60 * 24 * 365
 export const PARTIAL_REPOSITORY_CACHE_MS = 1000 * 60 * 60
 
@@ -44,19 +45,8 @@ export async function quarantineToken(db: Drizzle, stored: string) {
     .execute()
 }
 
-export async function selectTokens(
-  db: Drizzle,
-  needed: number,
-  sessionSecret: string,
-): Promise<ReservedGitHubToken[]> {
-  if (needed <= 0) {
-    return []
-  }
-
-  const now = nowSeconds()
-  const cutoff = now - TOKEN_COOLDOWN_SECONDS
-
-  const rows = await db.all<{ github_token: string; user_id: string }>(sql`
+const reserveTokenRows = async (db: Drizzle, needed: number, now: number, cutoff: number) =>
+  db.all<{ github_token: string; user_id: string }>(sql`
     UPDATE tokens
     SET last_token_use_at = ${now}
     WHERE rowid IN (
@@ -69,16 +59,43 @@ export async function selectTokens(
     RETURNING github_token, user_id
   `)
 
-  const reserved: ReservedGitHubToken[] = []
+export async function selectTokens(
+  db: Drizzle,
+  needed: number,
+  sessionSecret: string,
+): Promise<ReservedGitHubToken[]> {
+  if (needed <= 0) {
+    return []
+  }
 
-  for (const row of rows) {
-    const stored = row.github_token
-    try {
-      const plaintext = await decryptGitHubToken(stored, sessionSecret, row.user_id)
-      reserved.push({ plaintext, stored, userId: row.user_id })
-    } catch {
-      await quarantineToken(db, stored)
+  const reserved: ReservedGitHubToken[] = []
+  let attempts = 0
+
+  while (reserved.length < needed && attempts < SELECT_TOKEN_MAX_ATTEMPTS) {
+    const now = nowSeconds()
+    const cutoff = now - TOKEN_COOLDOWN_SECONDS
+    const stillNeeded = needed - reserved.length
+    const rows = await reserveTokenRows(db, stillNeeded, now, cutoff)
+
+    if (rows.length === 0) {
+      break
     }
+
+    for (const row of rows) {
+      const stored = row.github_token
+      try {
+        const plaintext = await decryptGitHubToken(stored, sessionSecret, row.user_id)
+        reserved.push({ plaintext, stored, userId: row.user_id })
+        if (reserved.length >= needed) {
+          break
+        }
+      } catch {
+        await quarantineToken(db, stored)
+        attempts++
+      }
+    }
+
+    attempts++
   }
 
   return reserved
@@ -145,29 +162,40 @@ export async function fetchExistingRepository(db: Drizzle, name: string) {
     return null
   }
 
-  if (isPartial) {
-    return null
-  }
-
   return [repository]
 }
 
-export async function fetchPartialRepository(db: Drizzle, name: string) {
-  const [repository] = await db
+export async function fetchSkippedStargazersForRepository(db: Drizzle, name: string) {
+  const rows = await db
     .select()
-    .from(schema.repositories)
-    .where(eq(schema.repositories.name, name))
+    .from(schema.repositorySkippedStargazers)
+    .where(eq(schema.repositorySkippedStargazers.repositoryId, name))
     .execute()
 
-  if (!repository?.checkedAt || !repository.isPartial) {
-    return null
+  return new Set(rows.map((row) => row.stargazerUsername))
+}
+
+export async function markStargazersSkipped(
+  db: Drizzle,
+  name: string,
+  ...usernames: string[]
+) {
+  if (usernames.length === 0) {
+    return
   }
 
-  if (repository.checkedAt <= repositoryCacheCutoff(true)) {
-    return null
+  for (const batch of chunkValues(usernames, RELATION_INSERT_BATCH_SIZE)) {
+    await db
+      .insert(schema.repositorySkippedStargazers)
+      .values(
+        batch.map((username) => ({
+          stargazerUsername: username,
+          repositoryId: name,
+        })),
+      )
+      .onConflictDoNothing()
+      .execute()
   }
-
-  return repository
 }
 
 export async function fetchScoredStargazersForRepository(db: Drizzle, name: string) {
@@ -260,4 +288,16 @@ export async function saveRepositoryScore(db: Drizzle, name: string, stats: Repo
     .execute()
 
   return repository
+}
+
+export async function saveEmptyRepositoryScore(db: Drizzle, name: string) {
+  return saveRepositoryScore(db, name, {
+    n_stars: 0,
+    n_scored_stars: 0,
+    n_fake_stars: 0,
+    n_low_activity: 0,
+    n_activity_cluster: 0,
+    score: 0,
+    is_partial: false,
+  })
 }

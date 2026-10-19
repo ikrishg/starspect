@@ -152,6 +152,8 @@ auth.get('/callback', async (c) => {
     target: schema.tokens.userId,
     set: {
       token: encryptedAccessToken,
+      tokenUnusable: false,
+      lastTokenUseAt: new Date(0),
     },
   })
 
@@ -181,7 +183,7 @@ auth.get('/callback', async (c) => {
     maxAge: Math.floor((expiresAt - Date.now()) / 1000),
   })
 
-  const sessionTtlSeconds = Math.max(1, Math.floor((expiresAt - Date.now()) / 1000))
+  const sessionTtlSeconds = Math.max(60, Math.floor((expiresAt - Date.now()) / 1000))
   await c.env.sessions.put(token, expiresAt.toString(), { expirationTtl: sessionTtlSeconds })
 
   deleteCookie(c, oauthStateCookie, { path: '/', secure: true, httpOnly: true })

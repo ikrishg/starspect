@@ -7,7 +7,12 @@ export type GithubRepositoryRef = {
   cacheKey: string
 }
 
-export const validateGithubOwner = (owner: string): boolean => GITHUB_OWNER_PATTERN.test(owner)
+export const validateGithubOwner = (owner: string): boolean => {
+  if (owner === '.' || owner === '..' || owner.includes('/') || owner.includes('..')) {
+    return false
+  }
+  return GITHUB_OWNER_PATTERN.test(owner)
+}
 
 export const validateGithubRepo = (repo: string): boolean => {
   if (!GITHUB_REPO_PATTERN.test(repo)) {

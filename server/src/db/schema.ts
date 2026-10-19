@@ -48,3 +48,14 @@ export const stargazersToRepos = sqliteTable(
   },
   (t) => [primaryKey({ columns: [t.stargazerUsername, t.repositoryId] })],
 )
+
+export const repositorySkippedStargazers = sqliteTable(
+  'repository_skipped_stargazers',
+  {
+    stargazerUsername: text('stargazer_username').notNull(),
+    repositoryId: text('repository_id')
+      .notNull()
+      .references(() => repositories.name),
+  },
+  (t) => [primaryKey({ columns: [t.stargazerUsername, t.repositoryId] })],
+)

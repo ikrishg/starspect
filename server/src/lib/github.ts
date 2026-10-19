@@ -11,11 +11,20 @@ export const GITHUB_HTTP_CALLS_PER_USER = 3
 // Workers invocations allow 50 subrequests on free; we budget below that for D1/KV/rate-limit overhead.
 export const WORKER_SUBREQUEST_BUDGET = 48
 
-export async function verifyRepositoryExists(owner: string, repo: string, token: string) {
+export type RepositoryMetadata = {
+  stargazers_count: number
+}
+
+export async function fetchRepositoryMetadata(
+  owner: string,
+  repo: string,
+  token: string,
+): Promise<RepositoryMetadata> {
   const octokit = createOctokit(token)
 
   try {
-    await octokit.request('HEAD /repos/{owner}/{repo}', { owner, repo })
+    const response = await octokit.request('GET /repos/{owner}/{repo}', { owner, repo })
+    return { stargazers_count: response.data.stargazers_count ?? 0 }
   } catch (error) {
     if (error instanceof RequestError && error.status === 404) {
       throw new HTTPException(404, { message: 'Repository not found' })

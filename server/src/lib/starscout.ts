@@ -7,15 +7,18 @@ import {
   STARGAZERS_PER_LIST_PAGE,
   WORKER_SUBREQUEST_BUDGET,
 } from './github'
+import { ensureSessionSecret } from './crypto-keys'
 import {
   countAvailableTokens,
   createRepositoryRelation,
   ensureRepositoryRow,
   fetchExistingRepository,
   fetchExistingUsers,
-  fetchPartialRepository,
   fetchScoredStargazersForRepository,
+  fetchSkippedStargazersForRepository,
+  markStargazersSkipped,
   releaseReservedTokens,
+  saveEmptyRepositoryScore,
   saveRepositoryScore,
   selectTokens,
 } from './database'
@@ -42,15 +45,23 @@ export const MAX_NEW_USERS_PER_REQUEST = Math.max(
 )
 
 export type ScoreGithubDeps = {
-  verifyRepositoryExists: typeof github.verifyRepositoryExists
+  fetchRepositoryMetadata: typeof github.fetchRepositoryMetadata
   fetchStargazers: typeof github.fetchStargazers
   fetchUser: typeof github.fetchUser
 }
 
 const defaultGithubDeps: ScoreGithubDeps = {
-  verifyRepositoryExists: github.verifyRepositoryExists,
+  fetchRepositoryMetadata: github.fetchRepositoryMetadata,
   fetchStargazers: github.fetchStargazers,
   fetchUser: github.fetchUser,
+}
+
+const assertSessionSecretConfigured = (sessionSecret: string) => {
+  try {
+    ensureSessionSecret(sessionSecret)
+  } catch {
+    throw new HTTPException(500, { message: 'Server session encryption is misconfigured' })
+  }
 }
 
 export async function score(
@@ -63,14 +74,17 @@ export async function score(
   const name = `${owner}/${repo}`
 
   const existingRepository = await fetchExistingRepository(db, name)
-  if (existingRepository) {
+  if (existingRepository && !existingRepository[0].isPartial) {
     return existingRepository[0]
   }
 
-  const partialRepository = await fetchPartialRepository(db, name)
-  const previouslyScored = partialRepository
-    ? await fetchScoredStargazersForRepository(db, name)
-    : []
+  assertSessionSecretConfigured(env.SESSION_SECRET)
+
+  const partialRow = existingRepository?.[0]?.isPartial ? existingRepository[0] : null
+  const previouslyScored = partialRow ? await fetchScoredStargazersForRepository(db, name) : []
+  const skippedStargazers = partialRow
+    ? await fetchSkippedStargazersForRepository(db, name)
+    : new Set<string>()
 
   const baseReserved = await selectTokens(db, 1, env.SESSION_SECRET)
   if (baseReserved.length === 0) {
@@ -82,25 +96,32 @@ export async function score(
   const reservedTokens = [...baseReserved]
 
   try {
-    await deps.verifyRepositoryExists(owner, repo, baseReserved[0].plaintext)
+    const metadata = await deps.fetchRepositoryMetadata(owner, repo, baseReserved[0].plaintext)
     await ensureRepositoryRow(db, name)
 
+    if (metadata.stargazers_count === 0) {
+      await releaseReservedTokens(db, reservedTokens)
+      return saveEmptyRepositoryScore(db, name)
+    }
+
     const stargazers = await deps.fetchStargazers(owner, repo, baseReserved[0].plaintext)
-    const listedCount = stargazers.length
+    const sampleListed = stargazers
+    const totalStarCount = metadata.stargazers_count
     const scoredUsernames = new Set(previouslyScored.map((user) => user.username))
 
     const precomputed = await fetchExistingUsers(
       db,
-      ...stargazers.filter((login) => !scoredUsernames.has(login)),
+      ...sampleListed.filter((login) => !scoredUsernames.has(login) && !skippedStargazers.has(login)),
     )
 
     for (const user of previouslyScored) {
       precomputed.set(user.username, user)
     }
 
-    const newUsers = stargazers
-      .filter((stargazer) => !precomputed.has(stargazer))
-      .slice(0, MAX_NEW_USERS_PER_REQUEST)
+    const isResolved = (login: string) =>
+      precomputed.has(login) || scoredUsernames.has(login) || skippedStargazers.has(login)
+
+    const newUsers = sampleListed.filter((stargazer) => !isResolved(stargazer)).slice(0, MAX_NEW_USERS_PER_REQUEST)
 
     const chunks = chunk(newUsers, GITHUB_USERS_PER_TOKEN)
     const additionalNeeded = Math.max(0, chunks.length - 1)
@@ -124,6 +145,8 @@ export async function score(
     }
 
     let hadFetchFailures = false
+    const unavailableThisRequest: string[] = []
+
     const fetchedUsers =
       chunks.length === 0
         ? []
@@ -136,11 +159,14 @@ export async function score(
                   ),
                 )
 
-                return settled.flatMap((result) => {
+                return settled.flatMap((result, resultIndex) => {
+                  const username = userChunk[resultIndex]
                   if (result.status === 'fulfilled') {
                     if (result.value) {
                       return [result.value]
                     }
+                    unavailableThisRequest.push(username)
+                    skippedStargazers.add(username)
                     return []
                   }
                   hadFetchFailures = true
@@ -150,24 +176,32 @@ export async function score(
             )
           ).flat()
 
+    if (unavailableThisRequest.length > 0) {
+      await markStargazersSkipped(db, name, ...unavailableThisRequest)
+    }
+
     const users = [...precomputed.values(), ...fetchedUsers]
     const uniqueUsers = [...new Map(users.map((user) => [user.username, user])).values()]
     const scoredCount = uniqueUsers.length
-
-    const isPartial =
-      hadFetchFailures || listedCount >= MAX_STARGAZERS_TO_LIST || scoredCount < listedCount
 
     if (fetchedUsers.length > 0) {
       await createRepositoryRelation(db, name, ...fetchedUsers.map((user) => user.username))
     }
 
-    if (scoredCount === 0) {
+    const unresolvedInSample = sampleListed.filter(
+      (login) =>
+        !uniqueUsers.some((user) => user.username === login) && !skippedStargazers.has(login),
+    )
+
+    const isPartial = hadFetchFailures || unresolvedInSample.length > 0
+
+    if (scoredCount === 0 && skippedStargazers.size === 0 && unresolvedInSample.length > 0) {
       throw new HTTPException(503, {
         message: 'Could not score any stargazers for this repository yet',
       })
     }
 
-    const repositoryStats = scoreRepository(uniqueUsers, listedCount)
+    const repositoryStats = scoreRepository(uniqueUsers, totalStarCount)
     return saveRepositoryScore(db, name, {
       ...repositoryStats,
       is_partial: isPartial,

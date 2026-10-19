@@ -1,9 +1,10 @@
 import { Hono } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
+import { HTTPException } from 'hono/http-exception'
 import type { AppBindings } from './env'
 import { auth } from './routes/auth'
 import { score as scoreRepository } from './lib/starscout'
-import { getSession } from './lib/auth'
+import { clearSession, getSession } from './lib/auth'
 import { enforceCheckRateLimit } from './lib/rate-limit'
 import { normalizeGithubRepository } from './lib/github-names'
 import { parseCheckBody } from './lib/check-body'
@@ -52,7 +53,22 @@ app.post(
       return c.json({ error: normalized.error }, 400)
     }
 
-    const scored = await scoreRepository(c.env, normalized.owner, normalized.repo)
+    let scored
+    try {
+      scored = await scoreRepository(c.env, normalized.owner, normalized.repo, session.userId)
+    } catch (error) {
+      if (error instanceof HTTPException && error.status === 401) {
+        await clearSession(c)
+        return c.json(
+          {
+            error: error.message,
+            hint: 'Sign in with GitHub again',
+          },
+          401,
+        )
+      }
+      throw error
+    }
 
     return c.json({
       score: scored.score ?? 0,

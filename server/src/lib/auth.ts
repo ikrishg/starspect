@@ -79,6 +79,17 @@ export const getSession = async (c: Context<{ Bindings: AppBindings }>) => {
   }
 }
 
+export const clearSession = async (c: Context<{ Bindings: AppBindings }>) => {
+  const token =
+    getCookie(c, 'starspect_session') || c.req.header('Authorization')?.split(' ')[1] || null
+
+  if (token) {
+    await c.env.sessions.delete(token)
+  }
+
+  deleteCookie(c, 'starspect_session')
+}
+
 export const isLoggedIn = async (c: Context<{ Bindings: AppBindings }>) => {
   const session = await getSession(c)
   return session !== null

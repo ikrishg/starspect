@@ -12,12 +12,8 @@ import { applyD1Migrations } from '../test-fixtures/apply-migrations'
 import { HTTPException } from 'hono/http-exception'
 import { RequestError } from '@octokit/request-error'
 import { encryptGitHubToken } from './tokens'
-import {
-  FULL_REPOSITORY_CACHE_MS,
-  MAX_STARGAZER_FETCH_FAILURES,
-  releaseReservedTokens,
-  selectTokens,
-} from './database'
+import { FULL_REPOSITORY_CACHE_MS, MAX_STARGAZER_FETCH_FAILURES } from './database'
+import { reserveUserGitHubToken, releaseUserGitHubToken } from './user-token'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -99,7 +95,7 @@ describe('score() integration', () => {
       },
     }
 
-    const result = await score(testEnv(db), 'octo', 'repo', testGithub)
+    const result = await score(testEnv(db), 'octo', 'repo', '1', testGithub)
 
     assert.equal(result.name, 'octo/repo')
     assert.equal(result.n_stars, 1)
@@ -121,7 +117,7 @@ describe('score() integration', () => {
       fetchUser: async () => null,
     }
 
-    const result = await score(testEnv(db), 'empty', 'repo', testGithub)
+    const result = await score(testEnv(db), 'empty', 'repo', '1', testGithub)
     assert.equal(result.n_stars, 0)
     assert.equal(result.score, 0)
     assert.equal(result.isPartial, false)
@@ -144,7 +140,7 @@ describe('score() integration', () => {
     }
 
     const env = testEnv(db)
-    const first = await score(env, 'big', 'repo', testGithub)
+    const first = await score(env, 'big', 'repo', '1', testGithub)
     assert.equal(first.isPartial, true)
     assert.equal(first.n_scored_stars, 10)
 
@@ -154,7 +150,7 @@ describe('score() integration', () => {
       .set({ lastTokenUseAt: new Date(0) })
       .where(eq(schema.tokens.userId, '1'))
 
-    const second = await score(env, 'big', 'repo', testGithub)
+    const second = await score(env, 'big', 'repo', '1', testGithub)
     assert.equal(second.isPartial, false)
     assert.equal(second.n_scored_stars, 11)
     assert.equal(second.n_stars, 11)
@@ -178,11 +174,11 @@ describe('score() integration', () => {
     }
 
     const env = testEnv(db)
-    const first = await score(env, 'skip', 'repo', testGithub)
+    const first = await score(env, 'skip', 'repo', '1', testGithub)
     assert.equal(first.isPartial, false)
     assert.equal(first.n_stars, 2)
 
-    const second = await score(env, 'skip', 'repo', testGithub)
+    const second = await score(env, 'skip', 'repo', '1', testGithub)
     assert.equal(second.isPartial, false)
     assert.equal(second.n_stars, 2)
 
@@ -207,32 +203,43 @@ describe('score() integration', () => {
       fetchUser: async () => null,
     }
 
-    await assert.rejects(() => score({ ...testEnv(db), SESSION_SECRET: secret }, 'err', 'repo', testGithub))
+    await assert.rejects(() =>
+      score({ ...testEnv(db), SESSION_SECRET: secret }, 'err', 'repo', '1', testGithub),
+    )
 
     const [tokenRow] = await tokenDb.select().from(schema.tokens).where(eq(schema.tokens.userId, '1'))
     assert.equal(tokenRow.lastTokenUseAt?.getTime(), 0)
   })
 
-  it('quarantines bad tokens and still reserves healthy ones', async () => {
+  it('never decrypts or mutates another user token during score', async () => {
     const secret = sessionSecret()
     const tokenDb = drizzle(db, { schema })
+    const bCooldownAt = new Date('2024-06-01T00:00:00Z')
     await tokenDb.insert(schema.tokens).values({
       userId: '2',
-      username: 'broken',
+      username: 'other',
       token: 'not-valid-ciphertext.iv.data',
-      lastTokenUseAt: new Date(0),
+      lastTokenUseAt: bCooldownAt,
       tokenUnusable: false,
     })
 
-    const reserved = await selectTokens(tokenDb, 2, secret)
-    assert.equal(reserved.length, 1)
-    assert.equal(reserved[0].userId, '1')
+    const testGithub: ScoreGithubDeps = {
+      fetchRepositoryMetadata: async () => ({ stargazers_count: 0 }),
+      fetchStargazers: async () => [],
+      fetchUser: async () => null,
+    }
 
-    const rows = await tokenDb.select().from(schema.tokens).execute()
-    const broken = rows.find((row) => row.userId === '2')
-    assert.equal(broken?.tokenUnusable, true)
+    await score({ ...testEnv(db), SESSION_SECRET: secret }, 'iso', 'repo', '1', testGithub)
 
-    await releaseReservedTokens(tokenDb, reserved)
+    const [repoRow] = await tokenDb
+      .select()
+      .from(schema.repositories)
+      .where(eq(schema.repositories.name, 'iso/repo'))
+    assert.ok(repoRow)
+
+    const [bRow] = await tokenDb.select().from(schema.tokens).where(eq(schema.tokens.userId, '2'))
+    assert.equal(bRow.lastTokenUseAt?.getTime(), bCooldownAt.getTime())
+    assert.equal(bRow.tokenUnusable, false)
   })
 
   it('remembers skipped stargazers after the partial cache expires', async () => {
@@ -259,7 +266,7 @@ describe('score() integration', () => {
 
     const repoSlug = `stale-${crypto.randomUUID()}`
     const env = testEnv(db)
-    const roundOne = await score(env, 'stale', repoSlug, testGithub)
+    const roundOne = await score(env, 'stale', repoSlug, '1', testGithub)
     assert.equal(roundOne.isPartial, true)
 
     const tokenDb = drizzle(db, { schema })
@@ -272,7 +279,7 @@ describe('score() integration', () => {
       .set({ checkedAt: new Date(Date.now() - 2.1 * 60 * 60 * 1000) })
       .where(eq(schema.repositories.name, `stale/${repoSlug}`))
 
-    const roundTwo = await score(env, 'stale', repoSlug, testGithub)
+    const roundTwo = await score(env, 'stale', repoSlug, '1', testGithub)
     assert.equal(roundTwo.isPartial, false)
     assert.equal(roundTwo.n_scored_stars, 1)
 
@@ -285,7 +292,7 @@ describe('score() integration', () => {
       .set({ checkedAt: new Date(Date.now() - 2.1 * 60 * 60 * 1000) })
       .where(eq(schema.repositories.name, `stale/${repoSlug}`))
 
-    const roundThree = await score(env, 'stale', repoSlug, testGithub)
+    const roundThree = await score(env, 'stale', repoSlug, '1', testGithub)
     assert.equal(roundThree.isPartial, false)
     assert.equal(roundThree.n_scored_stars, 1)
   })
@@ -303,7 +310,9 @@ describe('score() integration', () => {
       fetchUser: async () => null,
     }
 
-    await assert.rejects(() => score({ ...testEnv(db), SESSION_SECRET: secret }, 'revoked', 'repo', testGithub))
+    await assert.rejects(() =>
+      score({ ...testEnv(db), SESSION_SECRET: secret }, 'revoked', 'repo', '1', testGithub),
+    )
 
     const [row] = await tokenDb.select().from(schema.tokens).where(eq(schema.tokens.userId, '1'))
     assert.equal(row.tokenUnusable, true)
@@ -330,7 +339,7 @@ describe('score() integration', () => {
         .update(schema.tokens)
         .set({ lastTokenUseAt: new Date(0) })
         .where(eq(schema.tokens.userId, '1'))
-      const result = await score(env, 'failures', failureRepo, testGithub)
+      const result = await score(env, 'failures', failureRepo, '1', testGithub)
       if (round < MAX_STARGAZER_FETCH_FAILURES - 1) {
         assert.equal(result.isPartial, true)
       }
@@ -341,7 +350,7 @@ describe('score() integration', () => {
       .update(schema.tokens)
       .set({ lastTokenUseAt: new Date(0) })
       .where(eq(schema.tokens.userId, '1'))
-    const finalResult = await score(env, 'failures', failureRepo, testGithub)
+    const finalResult = await score(env, 'failures', failureRepo, '1', testGithub)
     assert.equal(finalResult.isPartial, false)
     assert.equal(finalResult.n_scored_stars, 0)
   })
@@ -353,7 +362,7 @@ describe('score() integration', () => {
       fetchUser: async () => null,
     }
 
-    const result = await score(testEnv(db), 'hidden', 'stars', testGithub)
+    const result = await score(testEnv(db), 'hidden', 'stars', '1', testGithub)
     assert.equal(result.isPartial, true)
     assert.equal(result.n_stars, 3)
   })
@@ -377,7 +386,7 @@ describe('score() integration', () => {
     }
 
     const env = testEnv(db)
-    await score(env, 'refresh', repoSlug, testGithub)
+    await score(env, 'refresh', repoSlug, '1', testGithub)
     assert.equal(fetchCalls, 1)
 
     const tokenDb = drizzle(db, { schema })
@@ -398,7 +407,7 @@ describe('score() integration', () => {
       .set({ lastTokenUseAt: new Date(0) })
       .where(eq(schema.tokens.userId, '1'))
 
-    await score(env, 'refresh', repoSlug, testGithub)
+    await score(env, 'refresh', repoSlug, '1', testGithub)
     assert.equal(fetchCalls, 2)
   })
 
@@ -433,7 +442,7 @@ describe('score() integration', () => {
     }
 
     const env = testEnv(db)
-    const result = await score(env, 'throttle', repoSlug, testGithub)
+    const result = await score(env, 'throttle', repoSlug, '1', testGithub)
     assert.equal(result.isPartial, true)
     assert.equal(result.n_scored_stars, 1)
 
@@ -453,7 +462,7 @@ describe('score() integration', () => {
     assert.ok(!skipped.some((row) => row.stargazerUsername === 'still-valid'))
   })
 
-  it('recovers quarantined tokens after re-login style reset', async () => {
+  it('reserves only the session user after re-login style token reset', async () => {
     const secret = sessionSecret()
     const tokenDb = drizzle(db, { schema })
     const encrypted = await encryptGitHubToken('ghp_recovered', secret, '3')
@@ -480,9 +489,51 @@ describe('score() integration', () => {
       })
       .where(eq(schema.tokens.userId, '3'))
 
-    const reserved = await selectTokens(tokenDb, 1, secret)
-    assert.equal(reserved.length, 1)
-    assert.equal(reserved[0].userId, '3')
-    await releaseReservedTokens(tokenDb, reserved)
+    const reserved = await reserveUserGitHubToken(tokenDb, '3', secret)
+    assert.equal(reserved.userId, '3')
+    await releaseUserGitHubToken(tokenDb, reserved)
+  })
+
+  it('returns partial results and keeps token cooldown when hourly budget is exhausted mid-batch', async () => {
+    const repoSlug = `budget-${crypto.randomUUID()}`
+    const logins = Array.from({ length: 12 }, (_, index) => `budget-user-${index}`)
+    const rateLimitError = new RequestError('rate limit', 403, {
+      request: { method: 'GET', url: 'https://api.github.com/users/x', headers: {} },
+      response: {
+        status: 403,
+        headers: { 'x-ratelimit-remaining': '0' },
+        url: '',
+        data: { message: 'API rate limit exceeded' },
+      },
+    })
+
+    let profileFetches = 0
+    const testGithub: ScoreGithubDeps = {
+      fetchRepositoryMetadata: async () => ({ stargazers_count: logins.length }),
+      fetchStargazers: async () => logins,
+      fetchUser: async (d1, _token, username) => {
+        profileFetches++
+        if (profileFetches > 3) {
+          throw rateLimitError
+        }
+        const userDb = drizzle(d1, { schema })
+        const user = { ...sampleUser, username }
+        await userDb.insert(schema.stargazers).values(user).onConflictDoUpdate({
+          target: schema.stargazers.username,
+          set: user,
+        })
+        return user
+      },
+    }
+
+    const env = testEnv(db)
+    const result = await score(env, 'budget', repoSlug, '1', testGithub)
+    assert.equal(result.isPartial, true)
+    assert.ok((result.n_scored_stars ?? 0) > 0)
+    assert.ok((result.n_scored_stars ?? 0) < logins.length)
+
+    const tokenDb = drizzle(db, { schema })
+    const [tokenRow] = await tokenDb.select().from(schema.tokens).where(eq(schema.tokens.userId, '1'))
+    assert.ok((tokenRow.lastTokenUseAt?.getTime() ?? 0) > 0)
   })
 })

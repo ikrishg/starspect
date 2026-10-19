@@ -28,12 +28,14 @@ const chunkValues = <T>(values: T[], batchSize: number): T[][] => {
   return batches
 }
 
-export async function quarantineToken(db: Drizzle, stored: string) {
-  await db
+export async function quarantineToken(db: Drizzle, stored: string): Promise<number> {
+  const result = await db
     .update(schema.tokens)
     .set({ tokenUnusable: true, lastTokenUseAt: new Date() })
     .where(eq(schema.tokens.token, stored))
     .execute()
+
+  return (result as { meta?: { changes?: number } }).meta?.changes ?? 0
 }
 
 export async function releaseReservedTokens(db: Drizzle, reserved: ReservedGitHubToken[]) {

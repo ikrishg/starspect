@@ -20,7 +20,10 @@ export async function finalizeReservedTokensOnError(
   if (isGitHubTokenUnauthorized(error)) {
     const toQuarantine = unauthorizedToken ? [unauthorizedToken] : reserved
     for (const token of toQuarantine) {
-      await quarantineToken(db, token.stored)
+      const quarantined = await quarantineToken(db, token.stored)
+      if (quarantined === 0) {
+        await releaseReservedTokens(db, [token])
+      }
     }
 
     if (unauthorizedToken) {

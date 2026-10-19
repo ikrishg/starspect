@@ -1,20 +1,7 @@
-import { ensureSessionSecret } from './crypto-keys'
+import { getStarCsrfHmacKey, STAR_CSRF_KEY_INFO } from './crypto-keys'
 
-const STAR_CSRF_SCOPE = 'starspect-star-csrf-v1'
-
-const decodeSecret = (secret: string) => {
-  ensureSessionSecret(secret)
-  return Uint8Array.from(atob(secret), (character) => character.charCodeAt(0))
-}
-
-const hmacKey = (secret: string) =>
-  crypto.subtle.importKey('raw', decodeSecret(secret), { name: 'HMAC', hash: 'SHA-256' }, false, [
-    'sign',
-    'verify',
-  ])
-
-const toBase64Url = (bytes: ArrayBuffer) =>
-  btoa(String.fromCharCode(...new Uint8Array(bytes)))
+const toBase64Url = (bytes: Uint8Array) =>
+  btoa(String.fromCharCode(...bytes))
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '')
@@ -27,14 +14,14 @@ const fromBase64Url = (value: string) => {
 }
 
 const csrfPayload = (sessionUuid: string) =>
-  new TextEncoder().encode(`${STAR_CSRF_SCOPE}:${sessionUuid}`)
+  new TextEncoder().encode(`${STAR_CSRF_KEY_INFO}:${sessionUuid}`)
 
 export const STAR_CSRF_PATTERN = /^[A-Za-z0-9_-]{43}$/
 
 export async function createStarCsrfToken(secret: string, sessionUuid: string) {
-  const key = await hmacKey(secret)
+  const key = await getStarCsrfHmacKey(secret)
   const signature = await crypto.subtle.sign('HMAC', key, csrfPayload(sessionUuid))
-  return toBase64Url(signature)
+  return toBase64Url(new Uint8Array(signature))
 }
 
 export async function verifyStarCsrfToken(secret: string, sessionUuid: string, token: string) {
@@ -43,8 +30,13 @@ export async function verifyStarCsrfToken(secret: string, sessionUuid: string, t
   }
 
   try {
-    const key = await hmacKey(secret)
-    return crypto.subtle.verify('HMAC', key, fromBase64Url(token), csrfPayload(sessionUuid))
+    const signatureBytes = fromBase64Url(token)
+    if (toBase64Url(signatureBytes) !== token) {
+      return false
+    }
+
+    const key = await getStarCsrfHmacKey(secret)
+    return await crypto.subtle.verify('HMAC', key, signatureBytes, csrfPayload(sessionUuid))
   } catch {
     return false
   }

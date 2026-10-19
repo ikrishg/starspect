@@ -41,27 +41,35 @@ export const getSession = async (c: Context<{ Bindings: AppBindings }>) => {
     return null
   }
 
+  const invalidateSession = async () => {
+    await c.env.sessions.delete(token)
+    deleteCookie(c, 'starspect_session')
+  }
+
   try {
     const iv = token.slice(0, separator)
     const data = token.slice(separator + 1)
     const decrypted = await decrypt({ iv, data }, c.env.SESSION_SECRET)
     const parts = decrypted.split(':')
     if (parts.length !== 4) {
+      if (parts.length === 3) {
+        await invalidateSession()
+      }
       return null
     }
 
     const [uuid, login, userId, expiresAt] = parts
 
     if (
-      new Date(Number(expiresAt)) < new Date() ||
       !uuid ||
       !login ||
       !userId ||
       !/^\d+$/.test(userId) ||
+      !/^\d+$/.test(expiresAt) ||
+      new Date(Number(expiresAt)) < new Date() ||
       (await c.env.sessions.get(token)) !== expiresAt
     ) {
-      await c.env.sessions.delete(token)
-      deleteCookie(c, 'starspect_session')
+      await invalidateSession()
       return null
     }
 

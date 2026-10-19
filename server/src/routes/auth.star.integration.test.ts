@@ -50,11 +50,10 @@ const starPost = async (
     origin?: string
     secFetchSite?: string
     csrf?: string
+    includeCsrf?: boolean
     includeSession?: boolean
   },
 ) => {
-  const csrf =
-    options.csrf ?? (await createStarCsrfToken(sessionSecret, options.sessionUuid))
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   }
@@ -68,11 +67,18 @@ const starPost = async (
     headers.Cookie = `starspect_session=${options.sessionToken}`
   }
 
+  const body =
+    options.includeCsrf === false
+      ? JSON.stringify({})
+      : JSON.stringify({
+          csrf: options.csrf ?? (await createStarCsrfToken(sessionSecret, options.sessionUuid)),
+        })
+
   return auth.fetch(
     new Request('https://example.com/star', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ csrf }),
+      body,
     }),
     bindings(db, {
       get: async (key: string) => sessionKv.get(key) ?? null,
@@ -270,6 +276,7 @@ describe('auth star consent', () => {
     })
 
     assert.equal(response.status, 401)
+    assert.equal(sessionKv.has(legacyToken), false)
   })
 
   it('rejects star POST with invalid origin and CSRF combinations', async () => {
@@ -321,6 +328,16 @@ describe('auth star consent', () => {
           sessionToken,
           sessionUuid,
           origin: 'https://example.com',
+          includeCsrf: false,
+        },
+        status: 403,
+      },
+      {
+        label: 'malformed csrf',
+        init: {
+          sessionToken,
+          sessionUuid,
+          origin: 'https://example.com',
           csrf: 'not-a-valid-csrf-token',
         },
         status: 403,
@@ -331,7 +348,7 @@ describe('auth star consent', () => {
           sessionToken,
           sessionUuid,
           origin: 'https://example.com',
-          csrf: validCsrf.slice(0, -1) + (validCsrf.endsWith('a') ? 'b' : 'a'),
+          csrf: (validCsrf.startsWith('a') ? 'b' : 'a') + validCsrf.slice(1),
         },
         status: 403,
       },

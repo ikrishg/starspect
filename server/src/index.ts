@@ -25,7 +25,7 @@ app.post(
       return c.json({ error: 'Unauthorized' }, 401)
     }
 
-    const rateLimited = await enforceCheckRateLimit(c, session.login)
+    const rateLimited = await enforceCheckRateLimit(c, session.userId)
     if (rateLimited) {
       return rateLimited
     }

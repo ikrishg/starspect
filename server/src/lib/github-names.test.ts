@@ -19,6 +19,12 @@ describe('validateGithubOwner', () => {
     assert.equal(validateGithubOwner('-bad'), false)
     assert.equal(validateGithubOwner('owner/repo'), false)
   })
+
+  it('rejects dot and traversal owner names', () => {
+    assert.equal(validateGithubOwner('.'), false)
+    assert.equal(validateGithubOwner('..'), false)
+    assert.equal(validateGithubOwner('../x'), false)
+  })
 })
 
 describe('normalizeGithubRepository', () => {
@@ -36,5 +42,11 @@ describe('normalizeGithubRepository', () => {
   it('rejects dot-only repo names', () => {
     const result = normalizeGithubRepository('octocat', '.')
     assert.ok('error' in result)
+  })
+
+  it('rejects traversal owner names', () => {
+    assert.ok('error' in normalizeGithubRepository('..', 'repo'))
+    assert.ok('error' in normalizeGithubRepository('.', 'repo'))
+    assert.ok('error' in normalizeGithubRepository('../x', 'repo'))
   })
 })

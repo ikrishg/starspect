@@ -4,20 +4,27 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy --minify",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "compile": "tsc --noEmit",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "test": "node --import tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@octokit/plugin-throttling": "^11.0.3",
+    "@octokit/request-error": "^7.0.0",
     "@octokit/rest": "^22.0.1",
     "dotenv": "^17.4.2",
-    "drizzle-orm": "^0.45.4",
+    "drizzle-orm": "0.45.4",
     "hono": "^4.12.15",
     "lodash.chunk": "^4.2.0"
   },
   "devDependencies": {
     "@types/lodash.chunk": "^4.2.9",
+    "@cloudflare/workers-types": "^4.20251014.0",
     "@types/node": "^25.6.0",
-    "drizzle-kit": "^0.31.11",
+    "drizzle-kit": "0.31.11",
+    "tsx": "^4.20.5",
+    "typescript": "5.9.3",
     "wrangler": "^4.4.0"
   }
 }

@@ -137,7 +137,11 @@ auth.get('/callback', async (c) => {
   const { id, login } = (await user.json()) as { id: number; login: string }
 
   const db = drizzle(c.env.db, { schema })
-  const encryptedAccessToken = await encryptGitHubToken(access_token, c.env.SESSION_SECRET)
+  const encryptedAccessToken = await encryptGitHubToken(
+    access_token,
+    c.env.SESSION_SECRET,
+    String(id),
+  )
 
   await db.insert(schema.tokens).values({
     userId: String(id),

@@ -5,8 +5,9 @@ import { eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '../db/schema'
 import packageJson from '../../../package.json'
-import { encrypt } from '../lib/auth'
-import { encryptGitHubToken } from '../lib/tokens'
+import { encrypt, getSession } from '../lib/auth'
+import { encryptGitHubToken, decryptGitHubToken } from '../lib/tokens'
+import { putGitHubStar, STARSPECT_STAR_TARGET } from '../lib/github-star'
 
 const scope = 'public_repo read:user'
 
@@ -14,11 +15,12 @@ const auth = new Hono<{ Bindings: AppBindings }>()
 
 const oauthStateCookie = 'oauth_state'
 const oauthCodeVerifierCookie = 'oauth_code_verifier'
+export const starCsrfCookie = 'starspect_star_csrf'
 
 const githubRestHeaders = (accessToken: string): Record<string, string> => ({
   Authorization: `Bearer ${accessToken}`,
   Accept: 'application/vnd.github+json',
-  'User-Agent': `starspect/${packageJson.version} (Cloudflare Worker; +https://github.com/ikrishg/starspect)`
+  'User-Agent': `starspect/${packageJson.version} (Cloudflare Worker; +https://github.com/ikrishg/starspect)`,
 })
 
 const randomPkceVerifier = (): string => {
@@ -30,12 +32,41 @@ const randomPkceVerifier = (): string => {
     .replace(/=+$/, '')
 }
 
-const redirectUri = (c: Context) => {
-  const url = new URL(`${new URL(c.req.url).origin}/auth/callback`)
-  const starAction = c.req.query('star_repository')
-  starAction === 'true' ? url.searchParams.set('star_repository', starAction) : null
-  return url.toString()
+const redirectUri = (c: Context) => `${new URL(c.req.url).origin}/auth/callback`
+
+const issueStarCsrfToken = (c: Context) => {
+  const csrf = crypto.randomUUID()
+  setCookie(c, starCsrfCookie, csrf, {
+    path: '/auth',
+    secure: true,
+    httpOnly: true,
+    sameSite: 'Strict',
+  })
+  return csrf
 }
+
+const starConsentHtml = (csrf: string) => `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Star Starspect on GitHub</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+  </head>
+  <body>
+    <main>
+      <h1>Support Starspect</h1>
+      <p>
+        You are signed in. Starring
+        <strong>${STARSPECT_STAR_TARGET.owner}/${STARSPECT_STAR_TARGET.repo}</strong>
+        on GitHub is optional and only happens if you click below.
+      </p>
+      <form method="post" action="/auth/star">
+        <input type="hidden" name="csrf" value="${csrf}" />
+        <button type="submit">Star ${STARSPECT_STAR_TARGET.owner}/${STARSPECT_STAR_TARGET.repo} on GitHub</button>
+      </form>
+    </main>
+  </body>
+</html>`
 
 auth.get('/login', async (c) => {
   const url = new URL('https://github.com/login/oauth/authorize')
@@ -68,13 +99,78 @@ auth.get('/login', async (c) => {
   return c.redirect(url.toString())
 })
 
+auth.get('/star-consent', async (c) => {
+  const session = await getSession(c)
+  if (!session) {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+
+  const csrf = getCookie(c, starCsrfCookie) ?? issueStarCsrfToken(c)
+  return c.html(starConsentHtml(csrf))
+})
+
+auth.post('/star', async (c) => {
+  const session = await getSession(c)
+  if (!session) {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+
+  const origin = c.req.header('Origin')
+  const host = new URL(c.req.url).host
+  if (origin) {
+    const originHost = new URL(origin).host
+    if (originHost !== host) {
+      return c.json({ error: 'Forbidden' }, 403)
+    }
+  }
+
+  const csrfCookie = getCookie(c, starCsrfCookie)
+  const contentType = c.req.header('content-type')?.split(';')[0].trim().toLowerCase()
+  let csrfBody: string | undefined
+
+  if (contentType === 'application/json') {
+    const body = (await c.req.json().catch(() => null)) as { csrf?: string } | null
+    csrfBody = body?.csrf
+  } else {
+    const body = await c.req.parseBody()
+    csrfBody = typeof body.csrf === 'string' ? body.csrf : undefined
+  }
+
+  if (!csrfCookie || !csrfBody || csrfCookie !== csrfBody) {
+    return c.json({ error: 'Invalid CSRF token' }, 403)
+  }
+
+  const db = drizzle(c.env.db, { schema })
+  const [tokenRow] = await db
+    .select()
+    .from(schema.tokens)
+    .where(eq(schema.tokens.username, session.login))
+    .execute()
+
+  if (!tokenRow) {
+    return c.json({ error: 'GitHub token not found for this account' }, 400)
+  }
+
+  const accessToken = await decryptGitHubToken(
+    tokenRow.token,
+    c.env.SESSION_SECRET,
+    tokenRow.userId,
+  )
+
+  await putGitHubStar(accessToken)
+  deleteCookie(c, starCsrfCookie, { path: '/auth', secure: true, httpOnly: true })
+
+  return c.json({
+    starred: true,
+    repository: `${STARSPECT_STAR_TARGET.owner}/${STARSPECT_STAR_TARGET.repo}`,
+  })
+})
+
 auth.get('/callback', async (c) => {
   const code = c.req.query('code')
   const state = c.req.query('state')
   const codeVerifier = getCookie(c, oauthCodeVerifierCookie)
   const storedState = getCookie(c, oauthStateCookie)
-
-  const starAction = c.req.query('star_repository')
 
   if (state !== storedState) {
     return c.json({ error: 'OAuth state mismatch' }, 400)
@@ -167,13 +263,6 @@ auth.get('/callback', async (c) => {
     set: tokenUpdate,
   })
 
-  if (starAction === 'true') {
-    await fetch('https://api.github.com/user/starred/ikrishg/starspect', {
-      method: 'PUT',
-      headers: githubRestHeaders(access_token),
-    })
-  }
-
   const expiresAt = new Date(Date.now() /** one year */ + 1000 * 60 * 60 * 24 * 365).getTime()
 
   const tokenContent = [
@@ -193,6 +282,8 @@ auth.get('/callback', async (c) => {
     maxAge: Math.floor((expiresAt - Date.now()) / 1000),
   })
 
+  issueStarCsrfToken(c)
+
   const sessionTtlSeconds = Math.max(60, Math.floor((expiresAt - Date.now()) / 1000))
   await c.env.sessions.put(token, expiresAt.toString(), { expirationTtl: sessionTtlSeconds })
 
@@ -203,7 +294,7 @@ auth.get('/callback', async (c) => {
     token: token,
     expiresAt: expiresAt,
     login: login,
-    starAction: starAction === 'true',
+    starConsentUrl: '/auth/star-consent',
   })
 })
 

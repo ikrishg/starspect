@@ -1,7 +1,7 @@
 import * as schema from '../db/schema'
 import { and, eq, gt, inArray, sql } from 'drizzle-orm'
 import type { Drizzle } from '../db'
-import { decryptGitHubToken, encryptGitHubToken } from './tokens'
+import { decryptGitHubToken } from './tokens'
 
 const TOKEN_COOLDOWN_SECONDS = 60 * 60
 const D1_MAX_BOUND_PARAMS = 100
@@ -59,18 +59,8 @@ export async function selectTokens(
   const reserved: ReservedGitHubToken[] = []
 
   for (const row of rows) {
-    let stored = row.github_token
-    let plaintext = await decryptGitHubToken(stored, sessionSecret, row.user_id)
-
-    if (!stored.includes('.')) {
-      stored = await encryptGitHubToken(plaintext, sessionSecret, row.user_id)
-      await db
-        .update(schema.tokens)
-        .set({ token: stored })
-        .where(eq(schema.tokens.userId, row.user_id))
-        .execute()
-    }
-
+    const stored = row.github_token
+    const plaintext = await decryptGitHubToken(stored, sessionSecret, row.user_id)
     reserved.push({ plaintext, stored, userId: row.user_id })
   }
 

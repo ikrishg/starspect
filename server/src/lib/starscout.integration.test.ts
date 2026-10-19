@@ -211,35 +211,79 @@ describe('score() integration', () => {
     assert.equal(tokenRow.lastTokenUseAt?.getTime(), 0)
   })
 
-  it('never decrypts or mutates another user token during score', async () => {
+  it('never uses another user token when the session user is in cooldown', async () => {
     const secret = sessionSecret()
     const tokenDb = drizzle(db, { schema })
-    const bCooldownAt = new Date('2024-06-01T00:00:00Z')
+    const encryptedB = await encryptGitHubToken('ghp_user_b_only', secret, '2')
+    const bLastUse = new Date(0)
     await tokenDb.insert(schema.tokens).values({
       userId: '2',
       username: 'other',
-      token: 'not-valid-ciphertext.iv.data',
-      lastTokenUseAt: bCooldownAt,
+      token: encryptedB,
+      lastTokenUseAt: bLastUse,
       tokenUnusable: false,
     })
 
+    await tokenDb
+      .update(schema.tokens)
+      .set({ lastTokenUseAt: new Date() })
+      .where(eq(schema.tokens.userId, '1'))
+
+    let metadataCalls = 0
+    const tokensSeen: string[] = []
     const testGithub: ScoreGithubDeps = {
-      fetchRepositoryMetadata: async () => ({ stargazers_count: 0 }),
-      fetchStargazers: async () => [],
+      fetchRepositoryMetadata: async (_owner, _repo, accessToken) => {
+        metadataCalls++
+        tokensSeen.push(accessToken)
+        return { stargazers_count: 0 }
+      },
+      fetchStargazers: async () => {
+        throw new Error('should not list stargazers when user 1 is in cooldown')
+      },
       fetchUser: async () => null,
     }
 
-    await score({ ...testEnv(db), SESSION_SECRET: secret }, 'iso', 'repo', '1', testGithub)
+    await assert.rejects(
+      () => score({ ...testEnv(db), SESSION_SECRET: secret }, 'iso', 'repo', '1', testGithub),
+      (error: unknown) => error instanceof HTTPException && error.status === 429,
+    )
 
-    const [repoRow] = await tokenDb
-      .select()
-      .from(schema.repositories)
-      .where(eq(schema.repositories.name, 'iso/repo'))
-    assert.ok(repoRow)
+    assert.equal(metadataCalls, 0)
+    assert.deepEqual(tokensSeen, [])
 
     const [bRow] = await tokenDb.select().from(schema.tokens).where(eq(schema.tokens.userId, '2'))
-    assert.equal(bRow.lastTokenUseAt?.getTime(), bCooldownAt.getTime())
+    assert.equal(bRow.lastTokenUseAt?.getTime(), bLastUse.getTime())
     assert.equal(bRow.tokenUnusable, false)
+  })
+
+  it('passes only the session user plaintext token to GitHub fetch helpers', async () => {
+    const secret = sessionSecret()
+    const tokenDb = drizzle(db, { schema })
+    const encrypted = await encryptGitHubToken('ghp_user_one', secret, '1')
+    await tokenDb
+      .update(schema.tokens)
+      .set({ token: encrypted, lastTokenUseAt: new Date(0) })
+      .where(eq(schema.tokens.userId, '1'))
+
+    const tokensSeen: string[] = []
+    const testGithub: ScoreGithubDeps = {
+      fetchRepositoryMetadata: async (_owner, _repo, accessToken) => {
+        tokensSeen.push(accessToken)
+        return { stargazers_count: 0 }
+      },
+      fetchStargazers: async (_owner, _repo, accessToken) => {
+        tokensSeen.push(accessToken)
+        return []
+      },
+      fetchUser: async (_d1, accessToken) => {
+        tokensSeen.push(accessToken)
+        return null
+      },
+    }
+
+    await score({ ...testEnv(db), SESSION_SECRET: secret }, 'token', 'probe', '1', testGithub)
+    assert.ok(tokensSeen.length > 0)
+    assert.ok(tokensSeen.every((token) => token === 'ghp_user_one'))
   })
 
   it('remembers skipped stargazers after the partial cache expires', async () => {

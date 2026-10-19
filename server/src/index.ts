@@ -57,15 +57,26 @@ app.post(
     try {
       scored = await scoreRepository(c.env, normalized.owner, normalized.repo, session.userId)
     } catch (error) {
-      if (error instanceof HTTPException && error.status === 401) {
-        await clearSession(c)
-        return c.json(
-          {
-            error: error.message,
-            hint: 'Sign in with GitHub again',
-          },
-          401,
-        )
+      if (error instanceof HTTPException) {
+        if (error.status === 401) {
+          await clearSession(c)
+          return c.json(
+            {
+              error: error.message,
+              hint: 'Sign in with GitHub again',
+            },
+            401,
+          )
+        }
+        if (error.status === 429) {
+          return c.json(
+            {
+              error: error.message,
+              hint: 'Try again after the one-hour cooldown',
+            },
+            429,
+          )
+        }
       }
       throw error
     }

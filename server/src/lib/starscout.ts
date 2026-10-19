@@ -36,9 +36,6 @@ import { scoreRepository } from './scoring'
 const STARGAZER_LIST_PAGES = Math.ceil(MAX_STARGAZERS_TO_LIST / STARGAZERS_PER_LIST_PAGE)
 const RESERVED_SUBREQUESTS = 6
 
-/** GitHub REST budget per OAuth token per hour (secondary rate limits apply per token). */
-export const GITHUB_TOKEN_HOURLY_REQUEST_BUDGET = 5000
-
 // Per-request subrequest budget: list pages + repo verify + D1/KV/rate-limit overhead + up to
 // MAX_NEW_USERS_PER_REQUEST stargazer profiles at GITHUB_HTTP_CALLS_PER_USER calls each.
 export const MAX_NEW_USERS_PER_REQUEST = Math.max(

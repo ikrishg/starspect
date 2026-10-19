@@ -49,14 +49,15 @@ export async function reserveUserGitHubToken(
     }
 
     throw new HTTPException(429, {
-      message: 'Your GitHub token is in a short cooldown after a recent API use; try again later',
+      message:
+        'Your GitHub token is in a one-hour cooldown after a recent API use; try again later',
     })
   }
 
   const row = rows[0]
   try {
     const plaintext = await decryptGitHubToken(row.github_token, sessionSecret, userId)
-    return { plaintext, stored: row.github_token, userId: row.user_id }
+    return { plaintext, stored: row.github_token, userId: row.user_id, reservedAt: now }
   } catch {
     await quarantineToken(db, row.github_token)
     throw new HTTPException(401, {

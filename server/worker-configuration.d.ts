@@ -7,6 +7,7 @@ declare namespace Cloudflare {
 	}
 	interface Env {
 		sessions: KVNamespace;
+		CHECK_RATE_LIMITER: RateLimit;
 		db: D1Database;
 		CLIENT_ID: string;
 		CLIENT_SECRET: string;

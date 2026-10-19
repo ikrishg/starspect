@@ -17,6 +17,16 @@
       "migrations_dir": "drizzle"
     }
   ],
+  "ratelimits": [
+    {
+      "name": "CHECK_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 10,
+        "period": 60
+      }
+    }
+  ],
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1

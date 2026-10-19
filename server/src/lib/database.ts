@@ -1,12 +1,18 @@
 import * as schema from '../db/schema'
-import { asc, and, eq, gt, inArray, lt, sql } from 'drizzle-orm'
+import { and, eq, gt, inArray, sql } from 'drizzle-orm'
 import type { Drizzle } from '../db'
-import { decryptGitHubToken } from './tokens'
+import { decryptGitHubToken, encryptGitHubToken } from './tokens'
 
-const TOKEN_COOLDOWN_MS = 1000 * 60 * 60
+const TOKEN_COOLDOWN_SECONDS = 60 * 60
 const D1_MAX_BOUND_PARAMS = 100
 const USER_LOOKUP_BATCH_SIZE = D1_MAX_BOUND_PARAMS - 1
 const RELATION_INSERT_BATCH_SIZE = Math.floor(D1_MAX_BOUND_PARAMS / 2)
+
+export type ReservedGitHubToken = {
+  plaintext: string
+  stored: string
+  userId: string
+}
 
 const chunkValues = <T>(values: T[], batchSize: number): T[][] => {
   const batches: T[][] = []
@@ -16,15 +22,29 @@ const chunkValues = <T>(values: T[], batchSize: number): T[][] => {
   return batches
 }
 
-export async function selectTokens(db: Drizzle, needed: number, sessionSecret: string) {
+const nowSeconds = () => Math.floor(Date.now() / 1000)
+
+export async function countAvailableTokens(db: Drizzle) {
+  const cutoff = nowSeconds() - TOKEN_COOLDOWN_SECONDS
+  const [{ count }] = await db.all<{ count: number }>(sql`
+    SELECT COUNT(*) as count FROM tokens WHERE last_token_use_at < ${cutoff}
+  `)
+  return count
+}
+
+export async function selectTokens(
+  db: Drizzle,
+  needed: number,
+  sessionSecret: string,
+): Promise<ReservedGitHubToken[]> {
   if (needed <= 0) {
     return []
   }
 
-  const now = Date.now()
-  const cutoff = now - TOKEN_COOLDOWN_MS
+  const now = nowSeconds()
+  const cutoff = now - TOKEN_COOLDOWN_SECONDS
 
-  const rows = await db.all<{ github_token: string }>(sql`
+  const rows = await db.all<{ github_token: string; user_id: string }>(sql`
     UPDATE tokens
     SET last_token_use_at = ${now}
     WHERE rowid IN (
@@ -33,10 +53,44 @@ export async function selectTokens(db: Drizzle, needed: number, sessionSecret: s
       ORDER BY last_token_use_at ASC
       LIMIT ${needed}
     )
-    RETURNING github_token
+    RETURNING github_token, user_id
   `)
 
-  return Promise.all(rows.map((row) => decryptGitHubToken(row.github_token, sessionSecret)))
+  const reserved: ReservedGitHubToken[] = []
+
+  for (const row of rows) {
+    let stored = row.github_token
+    let plaintext = await decryptGitHubToken(stored, sessionSecret, row.user_id)
+
+    if (!stored.includes('.')) {
+      stored = await encryptGitHubToken(plaintext, sessionSecret, row.user_id)
+      await db
+        .update(schema.tokens)
+        .set({ token: stored })
+        .where(eq(schema.tokens.userId, row.user_id))
+        .execute()
+    }
+
+    reserved.push({ plaintext, stored, userId: row.user_id })
+  }
+
+  return reserved
+}
+
+export async function releaseReservedTokens(db: Drizzle, reserved: ReservedGitHubToken[]) {
+  if (reserved.length === 0) {
+    return
+  }
+
+  const storedTokens = reserved.map((token) => token.stored)
+
+  for (const batch of chunkValues(storedTokens, USER_LOOKUP_BATCH_SIZE)) {
+    await db
+      .update(schema.tokens)
+      .set({ lastTokenUseAt: new Date(0) })
+      .where(inArray(schema.tokens.token, batch))
+      .execute()
+  }
 }
 
 export async function fetchExistingUsers(db: Drizzle, ...usernames: string[]) {
@@ -78,12 +132,6 @@ export async function fetchExistingRepository(db: Drizzle, name: string) {
     .execute()
 
   if (repository.length === 0) {
-    await db
-      .insert(schema.repositories)
-      .values({ name })
-      .onConflictDoNothing()
-      .execute()
-
     return null
   }
 

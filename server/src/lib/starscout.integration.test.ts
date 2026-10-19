@@ -12,7 +12,12 @@ import { applyD1Migrations } from '../test-fixtures/apply-migrations'
 import { HTTPException } from 'hono/http-exception'
 import { RequestError } from '@octokit/request-error'
 import { encryptGitHubToken } from './tokens'
-import { MAX_STARGAZER_FETCH_FAILURES, releaseReservedTokens, selectTokens } from './database'
+import {
+  FULL_REPOSITORY_CACHE_MS,
+  MAX_STARGAZER_FETCH_FAILURES,
+  releaseReservedTokens,
+  selectTokens,
+} from './database'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -351,6 +356,100 @@ describe('score() integration', () => {
     const result = await score(testEnv(db), 'hidden', 'stars', testGithub)
     assert.equal(result.isPartial, true)
     assert.equal(result.n_stars, 3)
+  })
+
+  it('refreshes stale linked stargazers after the repository cache expires', async () => {
+    const repoSlug = `refresh-${crypto.randomUUID()}`
+    let fetchCalls = 0
+    const testGithub: ScoreGithubDeps = {
+      fetchRepositoryMetadata: async () => ({ stargazers_count: 1 }),
+      fetchStargazers: async () => ['stale-alice'],
+      fetchUser: async (d1, _token, username) => {
+        fetchCalls++
+        const userDb = drizzle(d1, { schema })
+        const user = { ...sampleUser, username, checkedAt: new Date() }
+        await userDb.insert(schema.stargazers).values(user).onConflictDoUpdate({
+          target: schema.stargazers.username,
+          set: user,
+        })
+        return user
+      },
+    }
+
+    const env = testEnv(db)
+    await score(env, 'refresh', repoSlug, testGithub)
+    assert.equal(fetchCalls, 1)
+
+    const tokenDb = drizzle(db, { schema })
+    await tokenDb
+      .update(schema.stargazers)
+      .set({ checkedAt: new Date(Date.now() - FULL_REPOSITORY_CACHE_MS - 86_400_000) })
+      .where(eq(schema.stargazers.username, 'stale-alice'))
+    await tokenDb
+      .update(schema.repositories)
+      .set({
+        checkedAt: new Date(Date.now() - FULL_REPOSITORY_CACHE_MS - 86_400_000),
+        isPartial: false,
+      })
+      .where(eq(schema.repositories.name, `refresh/${repoSlug}`))
+
+    await tokenDb
+      .update(schema.tokens)
+      .set({ lastTokenUseAt: new Date(0) })
+      .where(eq(schema.tokens.userId, '1'))
+
+    await score(env, 'refresh', repoSlug, testGithub)
+    assert.equal(fetchCalls, 2)
+  })
+
+  it('does not count rate limits toward stargazer skip failures', async () => {
+    const repoSlug = `throttle-${crypto.randomUUID()}`
+    const logins = ['throttle-a', 'throttle-b', 'throttle-c', 'still-valid']
+    const rateLimitError = new RequestError('rate limit', 403, {
+      request: { method: 'GET', url: 'https://api.github.com/users/x', headers: {} },
+      response: {
+        status: 403,
+        headers: { 'x-ratelimit-remaining': '0' },
+        url: '',
+        data: { message: 'API rate limit exceeded' },
+      },
+    })
+
+    const testGithub: ScoreGithubDeps = {
+      fetchRepositoryMetadata: async () => ({ stargazers_count: logins.length }),
+      fetchStargazers: async () => logins,
+      fetchUser: async (d1, _token, username) => {
+        if (username.startsWith('throttle')) {
+          throw rateLimitError
+        }
+        const userDb = drizzle(d1, { schema })
+        const user = { ...sampleUser, username }
+        await userDb.insert(schema.stargazers).values(user).onConflictDoUpdate({
+          target: schema.stargazers.username,
+          set: user,
+        })
+        return user
+      },
+    }
+
+    const env = testEnv(db)
+    const result = await score(env, 'throttle', repoSlug, testGithub)
+    assert.equal(result.isPartial, true)
+
+    const tokenDb = drizzle(db, { schema })
+    const failures = await tokenDb
+      .select()
+      .from(schema.repositoryStargazerFailures)
+      .where(eq(schema.repositoryStargazerFailures.repositoryId, `throttle/${repoSlug}`))
+      .execute()
+    assert.equal(failures.length, 0)
+
+    const skipped = await tokenDb
+      .select()
+      .from(schema.repositorySkippedStargazers)
+      .where(eq(schema.repositorySkippedStargazers.repositoryId, `throttle/${repoSlug}`))
+      .execute()
+    assert.ok(!skipped.some((row) => row.stargazerUsername === 'still-valid'))
   })
 
   it('recovers quarantined tokens after re-login style reset', async () => {

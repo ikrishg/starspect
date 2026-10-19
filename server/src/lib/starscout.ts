@@ -16,6 +16,7 @@ import {
   fetchExistingUsers,
   fetchScoredStargazersForRepository,
   fetchSkippedStargazersForRepository,
+  clearStargazerFetchFailure,
   markStargazersSkipped,
   MAX_STARGAZER_FETCH_FAILURES,
   recordStargazerFetchFailure,
@@ -24,6 +25,7 @@ import {
   saveRepositoryScore,
   selectTokens,
 } from './database'
+import { isGitHubRateLimitResponse } from './github-errors'
 import {
   finalizeReservedTokensOnError,
   isGitHubTokenUnauthorized,
@@ -152,55 +154,67 @@ export async function score(
     }
 
     let hadFetchFailures = false
+    let hitRateLimit = false
     const unavailableThisRequest: string[] = []
     const scoredUsernameSet = new Set<string>()
+    const fetchedUsers: Array<typeof schema.stargazers.$inferSelect> = []
 
-    const fetchedUsers =
-      chunks.length === 0
-        ? []
-        : (
-            await Promise.all(
-              chunks.map(async (userChunk, index) => {
-                const settled = await Promise.allSettled(
-                  userChunk.map((user) =>
-                    deps.fetchUser(env.db, reservedTokens[index].plaintext, user),
-                  ),
-                )
+    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+      if (hitRateLimit) {
+        break
+      }
 
-                const chunkResults: Array<typeof schema.stargazers.$inferSelect> = []
+      const userChunk = chunks[chunkIndex]
+      const settled = await Promise.allSettled(
+        userChunk.map((user) =>
+          deps.fetchUser(env.db, reservedTokens[chunkIndex].plaintext, user),
+        ),
+      )
 
-                for (let resultIndex = 0; resultIndex < settled.length; resultIndex++) {
-                  const result = settled[resultIndex]
-                  const username = userChunk[resultIndex]
+      for (let resultIndex = 0; resultIndex < settled.length; resultIndex++) {
+        if (hitRateLimit) {
+          break
+        }
 
-                  if (result.status === 'fulfilled') {
-                    if (result.value) {
-                      chunkResults.push(result.value)
-                      scoredUsernameSet.add(username)
-                      continue
-                    }
-                    unavailableThisRequest.push(username)
-                    skippedStargazers.add(username)
-                    continue
-                  }
+        const result = settled[resultIndex]
+        const username = userChunk[resultIndex]
 
-                  if (isGitHubTokenUnauthorized(result.reason)) {
-                    await finalizeReservedTokensOnError(db, [reservedTokens[index]], result.reason)
-                    throw result.reason
-                  }
+        if (result.status === 'fulfilled') {
+          if (result.value) {
+            fetchedUsers.push(result.value)
+            scoredUsernameSet.add(username)
+            await clearStargazerFetchFailure(db, name, username)
+            continue
+          }
+          unavailableThisRequest.push(username)
+          skippedStargazers.add(username)
+          continue
+        }
 
-                  hadFetchFailures = true
-                  const failureCount = await recordStargazerFetchFailure(db, name, username)
-                  if (failureCount >= MAX_STARGAZER_FETCH_FAILURES) {
-                    unavailableThisRequest.push(username)
-                    skippedStargazers.add(username)
-                  }
-                }
+        if (isGitHubTokenUnauthorized(result.reason)) {
+          await finalizeReservedTokensOnError(
+            db,
+            reservedTokens,
+            result.reason,
+            reservedTokens[chunkIndex],
+          )
+          throw result.reason
+        }
 
-                return chunkResults
-              }),
-            )
-          ).flat()
+        if (isGitHubRateLimitResponse(result.reason)) {
+          hadFetchFailures = true
+          hitRateLimit = true
+          break
+        }
+
+        hadFetchFailures = true
+        const failureCount = await recordStargazerFetchFailure(db, name, username)
+        if (failureCount >= MAX_STARGAZER_FETCH_FAILURES) {
+          unavailableThisRequest.push(username)
+          skippedStargazers.add(username)
+        }
+      }
+    }
 
     if (unavailableThisRequest.length > 0) {
       await markStargazersSkipped(db, name, ...unavailableThisRequest)
@@ -229,7 +243,7 @@ export async function score(
       })
     }
 
-    const isPartial = hadFetchFailures || unresolvedInSample.length > 0
+    const isPartial = hadFetchFailures || hitRateLimit || unresolvedInSample.length > 0
 
     if (
       scoredCount === 0 &&
@@ -248,7 +262,11 @@ export async function score(
       is_partial: isPartial,
     })
   } catch (error) {
-    await finalizeReservedTokensOnError(db, reservedTokens, error)
+    const unauthorizedToken =
+      isGitHubTokenUnauthorized(error) && reservedTokens.length > 0
+        ? reservedTokens[0]
+        : undefined
+    await finalizeReservedTokensOnError(db, reservedTokens, error, unauthorizedToken)
     throw error
   }
 }

@@ -28,6 +28,25 @@ export const decrypt = async (encrypted: Awaited<ReturnType<typeof encrypt>>, se
   return decoder.decode(decrypted)
 }
 
+export const invalidateSession = async (
+  c: Context<{ Bindings: AppBindings }>,
+  sessionToken?: string | null,
+) => {
+  const token =
+    sessionToken ??
+    getCookie(c, 'starspect_session') ??
+    c.req.header('Authorization')?.split(' ')[1] ??
+    null
+
+  if (token) {
+    await c.env.sessions.delete(token)
+  }
+
+  deleteCookie(c, 'starspect_session')
+}
+
+export const clearSession = (c: Context<{ Bindings: AppBindings }>) => invalidateSession(c)
+
 export const getSession = async (c: Context<{ Bindings: AppBindings }>) => {
   const token =
     getCookie(c, 'starspect_session') || c.req.header('Authorization')?.split(' ')[1] || null
@@ -41,11 +60,6 @@ export const getSession = async (c: Context<{ Bindings: AppBindings }>) => {
     return null
   }
 
-  const invalidateSession = async () => {
-    await c.env.sessions.delete(token)
-    deleteCookie(c, 'starspect_session')
-  }
-
   try {
     const iv = token.slice(0, separator)
     const data = token.slice(separator + 1)
@@ -53,7 +67,7 @@ export const getSession = async (c: Context<{ Bindings: AppBindings }>) => {
     const parts = decrypted.split(':')
     if (parts.length !== 4) {
       if (parts.length === 3) {
-        await invalidateSession()
+        await invalidateSession(c, token)
       }
       return null
     }
@@ -69,7 +83,7 @@ export const getSession = async (c: Context<{ Bindings: AppBindings }>) => {
       new Date(Number(expiresAt)) < new Date() ||
       (await c.env.sessions.get(token)) !== expiresAt
     ) {
-      await invalidateSession()
+      await invalidateSession(c, token)
       return null
     }
 
@@ -77,17 +91,6 @@ export const getSession = async (c: Context<{ Bindings: AppBindings }>) => {
   } catch {
     return null
   }
-}
-
-export const clearSession = async (c: Context<{ Bindings: AppBindings }>) => {
-  const token =
-    getCookie(c, 'starspect_session') || c.req.header('Authorization')?.split(' ')[1] || null
-
-  if (token) {
-    await c.env.sessions.delete(token)
-  }
-
-  deleteCookie(c, 'starspect_session')
 }
 
 export const isLoggedIn = async (c: Context<{ Bindings: AppBindings }>) => {

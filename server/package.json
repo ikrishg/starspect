@@ -15,11 +15,9 @@
     "@octokit/rest": "^22.0.1",
     "dotenv": "^17.4.2",
     "drizzle-orm": "0.45.4",
-    "hono": "^4.12.15",
-    "lodash.chunk": "^4.2.0"
+    "hono": "^4.12.15"
   },
   "devDependencies": {
-    "@types/lodash.chunk": "^4.2.9",
     "@types/node": "^25.6.0",
     "miniflare": "^4.20260424.0",
     "drizzle-kit": "0.31.11",

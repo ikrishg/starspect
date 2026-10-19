@@ -16,6 +16,8 @@ export type ReservedGitHubToken = {
   plaintext: string
   stored: string
   userId: string
+  /** Unix seconds written to `last_token_use_at` at reservation time. */
+  reservedAt: number
 }
 
 const chunkValues = <T>(values: T[], batchSize: number): T[][] => {
@@ -35,18 +37,13 @@ export async function quarantineToken(db: Drizzle, stored: string) {
 }
 
 export async function releaseReservedTokens(db: Drizzle, reserved: ReservedGitHubToken[]) {
-  if (reserved.length === 0) {
-    return
-  }
-
-  const storedTokens = reserved.map((token) => token.stored)
-
-  for (const batch of chunkValues(storedTokens, USER_LOOKUP_BATCH_SIZE)) {
-    await db
-      .update(schema.tokens)
-      .set({ lastTokenUseAt: new Date(0) })
-      .where(inArray(schema.tokens.token, batch))
-      .execute()
+  for (const token of reserved) {
+    await db.run(sql`
+      UPDATE tokens
+      SET last_token_use_at = 0
+      WHERE user_id = ${token.userId}
+        AND last_token_use_at = ${token.reservedAt}
+    `)
   }
 }
 

@@ -4,7 +4,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy --minify",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "cf-typegen": "wrangler types --env-interface Env",
     "compile": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "build": "wrangler deploy --dry-run --outdir dist",
     "test": "node --import tsx --test src/**/*.test.ts"

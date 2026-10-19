@@ -99,6 +99,7 @@ export async function score(
   }
 
   const reservedTokens = [...baseReserved]
+  let tokensFinalized = false
 
   try {
     const metadata = await deps.fetchRepositoryMetadata(owner, repo, baseReserved[0].plaintext)
@@ -172,10 +173,6 @@ export async function score(
       )
 
       for (let resultIndex = 0; resultIndex < settled.length; resultIndex++) {
-        if (hitRateLimit) {
-          break
-        }
-
         const result = settled[resultIndex]
         const username = userChunk[resultIndex]
 
@@ -198,13 +195,14 @@ export async function score(
             result.reason,
             reservedTokens[chunkIndex],
           )
+          tokensFinalized = true
           throw result.reason
         }
 
         if (isGitHubRateLimitResponse(result.reason)) {
           hadFetchFailures = true
           hitRateLimit = true
-          break
+          continue
         }
 
         hadFetchFailures = true
@@ -262,11 +260,13 @@ export async function score(
       is_partial: isPartial,
     })
   } catch (error) {
-    const unauthorizedToken =
-      isGitHubTokenUnauthorized(error) && reservedTokens.length > 0
-        ? reservedTokens[0]
-        : undefined
-    await finalizeReservedTokensOnError(db, reservedTokens, error, unauthorizedToken)
+    if (!tokensFinalized) {
+      const unauthorizedToken =
+        isGitHubTokenUnauthorized(error) && reservedTokens.length > 0
+          ? reservedTokens[0]
+          : undefined
+      await finalizeReservedTokensOnError(db, reservedTokens, error, unauthorizedToken)
+    }
     throw error
   }
 }

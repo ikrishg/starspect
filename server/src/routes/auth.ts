@@ -1,11 +1,13 @@
 import { Context, Hono } from 'hono'
 import type { AppBindings } from '../env'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
-import { eq } from 'drizzle-orm'
+import { and, eq, ne, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '../db/schema'
 import packageJson from '../../../package.json'
 import { encrypt, getSession } from '../lib/auth'
+import { isSameOriginStarRequest } from '../lib/auth-origin'
+import { createStarCsrfToken, verifyStarCsrfToken } from '../lib/star-csrf'
 import { encryptGitHubToken, decryptGitHubToken } from '../lib/tokens'
 import { putGitHubStar, STARSPECT_STAR_TARGET } from '../lib/github-star'
 
@@ -15,7 +17,6 @@ const auth = new Hono<{ Bindings: AppBindings }>()
 
 const oauthStateCookie = 'oauth_state'
 const oauthCodeVerifierCookie = 'oauth_code_verifier'
-export const starCsrfCookie = 'starspect_star_csrf'
 
 const githubRestHeaders = (accessToken: string): Record<string, string> => ({
   Authorization: `Bearer ${accessToken}`,
@@ -34,16 +35,12 @@ const randomPkceVerifier = (): string => {
 
 const redirectUri = (c: Context) => `${new URL(c.req.url).origin}/auth/callback`
 
-const issueStarCsrfToken = (c: Context) => {
-  const csrf = crypto.randomUUID()
-  setCookie(c, starCsrfCookie, csrf, {
-    path: '/auth',
-    secure: true,
-    httpOnly: true,
-    sameSite: 'Strict',
-  })
-  return csrf
-}
+const escapeHtmlAttribute = (value: string) =>
+  value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
 
 const starConsentHtml = (csrf: string) => `<!DOCTYPE html>
 <html lang="en">
@@ -61,7 +58,7 @@ const starConsentHtml = (csrf: string) => `<!DOCTYPE html>
         on GitHub is optional and only happens if you click below.
       </p>
       <form method="post" action="/auth/star">
-        <input type="hidden" name="csrf" value="${csrf}" />
+        <input type="hidden" name="csrf" value="${escapeHtmlAttribute(csrf)}" />
         <button type="submit">Star ${STARSPECT_STAR_TARGET.owner}/${STARSPECT_STAR_TARGET.repo} on GitHub</button>
       </form>
     </main>
@@ -105,7 +102,7 @@ auth.get('/star-consent', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401)
   }
 
-  const csrf = getCookie(c, starCsrfCookie) ?? issueStarCsrfToken(c)
+  const csrf = await createStarCsrfToken(c.env.SESSION_SECRET, session.uuid)
   return c.html(starConsentHtml(csrf))
 })
 
@@ -115,16 +112,10 @@ auth.post('/star', async (c) => {
     return c.json({ error: 'Unauthorized' }, 401)
   }
 
-  const origin = c.req.header('Origin')
-  const host = new URL(c.req.url).host
-  if (origin) {
-    const originHost = new URL(origin).host
-    if (originHost !== host) {
-      return c.json({ error: 'Forbidden' }, 403)
-    }
+  if (!isSameOriginStarRequest(c)) {
+    return c.json({ error: 'Forbidden' }, 403)
   }
 
-  const csrfCookie = getCookie(c, starCsrfCookie)
   const contentType = c.req.header('content-type')?.split(';')[0].trim().toLowerCase()
   let csrfBody: string | undefined
 
@@ -136,7 +127,7 @@ auth.post('/star', async (c) => {
     csrfBody = typeof body.csrf === 'string' ? body.csrf : undefined
   }
 
-  if (!csrfCookie || !csrfBody || csrfCookie !== csrfBody) {
+  if (!csrfBody || !(await verifyStarCsrfToken(c.env.SESSION_SECRET, session.uuid, csrfBody))) {
     return c.json({ error: 'Invalid CSRF token' }, 403)
   }
 
@@ -144,7 +135,7 @@ auth.post('/star', async (c) => {
   const [tokenRow] = await db
     .select()
     .from(schema.tokens)
-    .where(eq(schema.tokens.username, session.login))
+    .where(eq(schema.tokens.userId, session.userId))
     .execute()
 
   if (!tokenRow) {
@@ -158,7 +149,6 @@ auth.post('/star', async (c) => {
   )
 
   await putGitHubStar(accessToken)
-  deleteCookie(c, starCsrfCookie, { path: '/auth', secure: true, httpOnly: true })
 
   return c.json({
     starred: true,
@@ -246,30 +236,37 @@ auth.get('/callback', async (c) => {
     .where(eq(schema.tokens.userId, String(id)))
     .execute()
 
+  const userId = String(id)
   const tokenUpdate = {
     token: encryptedAccessToken,
     tokenUnusable: false,
+    username: login,
     ...(existingToken?.tokenUnusable ? { lastTokenUseAt: new Date(0) } : {}),
   }
 
-  await db.insert(schema.tokens).values({
-    userId: String(id),
-    username: login,
-    token: encryptedAccessToken,
-    lastTokenUseAt: existingToken?.lastTokenUseAt ?? new Date(0),
-    tokenUnusable: false,
-  }).onConflictDoUpdate({
-    target: schema.tokens.userId,
-    set: tokenUpdate,
-  })
+  await db.batch([
+    db
+      .update(schema.tokens)
+      .set({ username: sql`'#' || ${schema.tokens.userId}` })
+      .where(and(eq(schema.tokens.username, login), ne(schema.tokens.userId, userId))),
+    db
+      .insert(schema.tokens)
+      .values({
+        userId,
+        username: login,
+        token: encryptedAccessToken,
+        lastTokenUseAt: existingToken?.lastTokenUseAt ?? new Date(0),
+        tokenUnusable: false,
+      })
+      .onConflictDoUpdate({
+        target: schema.tokens.userId,
+        set: tokenUpdate,
+      }),
+  ])
 
   const expiresAt = new Date(Date.now() /** one year */ + 1000 * 60 * 60 * 24 * 365).getTime()
 
-  const tokenContent = [
-    crypto.randomUUID(),
-    login,
-    expiresAt,
-  ].join(':')
+  const tokenContent = [crypto.randomUUID(), login, userId, expiresAt].join(':')
 
   const encrypted = await encrypt(tokenContent, c.env.SESSION_SECRET)
   const token = `${encrypted.iv}.${encrypted.data}`
@@ -281,8 +278,6 @@ auth.get('/callback', async (c) => {
     sameSite: 'Lax',
     maxAge: Math.floor((expiresAt - Date.now()) / 1000),
   })
-
-  issueStarCsrfToken(c)
 
   const sessionTtlSeconds = Math.max(60, Math.floor((expiresAt - Date.now()) / 1000))
   await c.env.sessions.put(token, expiresAt.toString(), { expirationTtl: sessionTtlSeconds })

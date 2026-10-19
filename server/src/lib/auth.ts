@@ -45,12 +45,19 @@ export const getSession = async (c: Context<{ Bindings: AppBindings }>) => {
     const iv = token.slice(0, separator)
     const data = token.slice(separator + 1)
     const decrypted = await decrypt({ iv, data }, c.env.SESSION_SECRET)
-    const [uuid, login, expiresAt] = decrypted.split(':')
+    const parts = decrypted.split(':')
+    if (parts.length !== 4) {
+      return null
+    }
+
+    const [uuid, login, userId, expiresAt] = parts
 
     if (
       new Date(Number(expiresAt)) < new Date() ||
       !uuid ||
       !login ||
+      !userId ||
+      !/^\d+$/.test(userId) ||
       (await c.env.sessions.get(token)) !== expiresAt
     ) {
       await c.env.sessions.delete(token)
@@ -58,7 +65,7 @@ export const getSession = async (c: Context<{ Bindings: AppBindings }>) => {
       return null
     }
 
-    return { uuid, login, expiresAt: new Date(Number(expiresAt)) }
+    return { uuid, login, userId, expiresAt: new Date(Number(expiresAt)) }
   } catch {
     return null
   }

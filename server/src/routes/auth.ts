@@ -5,6 +5,7 @@ import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '../db/schema'
 import packageJson from '../../../package.json'
 import { encrypt } from '../lib/auth'
+import { encryptGitHubToken } from '../lib/tokens'
 
 const scope = 'public_repo read:user'
 
@@ -16,7 +17,7 @@ const oauthCodeVerifierCookie = 'oauth_code_verifier'
 const githubRestHeaders = (accessToken: string): Record<string, string> => ({
   Authorization: `Bearer ${accessToken}`,
   Accept: 'application/vnd.github+json',
-  'User-Agent': `starspect/${packageJson.version} (Cloudflare Worker; +https://github.com/kkrishguptaa/starspect)'`
+  'User-Agent': `starspect/${packageJson.version} (Cloudflare Worker; +https://github.com/ikrishg/starspect)`
 })
 
 const randomPkceVerifier = (): string => {
@@ -136,22 +137,22 @@ auth.get('/callback', async (c) => {
   const { id, login } = (await user.json()) as { id: number; login: string }
 
   const db = drizzle(c.env.db, { schema })
+  const encryptedAccessToken = await encryptGitHubToken(access_token, c.env.SESSION_SECRET)
 
   await db.insert(schema.tokens).values({
     userId: String(id),
     username: login,
-    token: access_token,
-    lastTokenUseAt: new Date(),
+    token: encryptedAccessToken,
+    lastTokenUseAt: new Date(0),
   }).onConflictDoUpdate({
     target: schema.tokens.userId,
     set: {
-      token: access_token,
-      lastTokenUseAt: new Date(),
+      token: encryptedAccessToken,
     },
   })
 
   if (starAction === 'true') {
-    await fetch('https://api.github.com/user/starred/kkrishguptaa/starspect', {
+    await fetch('https://api.github.com/user/starred/ikrishg/starspect', {
       method: 'PUT',
       headers: githubRestHeaders(access_token),
     })
@@ -176,7 +177,7 @@ auth.get('/callback', async (c) => {
     maxAge: Math.floor((expiresAt - Date.now()) / 1000),
   })
 
-  c.env.sessions.put(token, expiresAt.toString())
+  await c.env.sessions.put(token, expiresAt.toString())
 
   deleteCookie(c, oauthStateCookie, { path: '/', secure: true, httpOnly: true })
   deleteCookie(c, oauthCodeVerifierCookie, { path: '/', secure: true, httpOnly: true })

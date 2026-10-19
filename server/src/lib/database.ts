@@ -1,15 +1,11 @@
 import * as schema from '../db/schema'
 import { and, eq, gt, inArray, sql } from 'drizzle-orm'
 import type { Drizzle } from '../db'
-import { decryptGitHubToken } from './tokens'
-
-const TOKEN_COOLDOWN_SECONDS = 60 * 60
 const D1_MAX_BOUND_PARAMS = 100
 const USER_LOOKUP_BATCH_SIZE = D1_MAX_BOUND_PARAMS - 1
 const RELATION_INSERT_BATCH_SIZE = Math.floor(D1_MAX_BOUND_PARAMS / 2)
 /** Skipped rows use 3 bound columns each; D1 allows at most 100 variables per statement. */
 export const SKIPPED_INSERT_BATCH_SIZE = 33
-const SELECT_TOKEN_MAX_ATTEMPTS = 50
 export const FULL_REPOSITORY_CACHE_MS = 1000 * 60 * 60 * 24 * 365
 export const PARTIAL_REPOSITORY_CACHE_MS = 1000 * 60 * 60
 export const SKIPPED_STARGAZER_TTL_MS = 1000 * 60 * 60 * 24 * 30
@@ -30,80 +26,12 @@ const chunkValues = <T>(values: T[], batchSize: number): T[][] => {
   return batches
 }
 
-const nowSeconds = () => Math.floor(Date.now() / 1000)
-
-export async function countAvailableTokens(db: Drizzle) {
-  const cutoff = nowSeconds() - TOKEN_COOLDOWN_SECONDS
-  const [{ count }] = await db.all<{ count: number }>(sql`
-    SELECT COUNT(*) as count FROM tokens
-    WHERE last_token_use_at < ${cutoff}
-      AND (token_unusable IS NULL OR token_unusable = 0)
-  `)
-  return count
-}
-
 export async function quarantineToken(db: Drizzle, stored: string) {
   await db
     .update(schema.tokens)
     .set({ tokenUnusable: true, lastTokenUseAt: new Date() })
     .where(eq(schema.tokens.token, stored))
     .execute()
-}
-
-const reserveTokenRows = async (db: Drizzle, needed: number, now: number, cutoff: number) =>
-  db.all<{ github_token: string; user_id: string }>(sql`
-    UPDATE tokens
-    SET last_token_use_at = ${now}
-    WHERE rowid IN (
-      SELECT rowid FROM tokens
-      WHERE last_token_use_at < ${cutoff}
-        AND (token_unusable IS NULL OR token_unusable = 0)
-      ORDER BY last_token_use_at ASC
-      LIMIT ${needed}
-    )
-    RETURNING github_token, user_id
-  `)
-
-export async function selectTokens(
-  db: Drizzle,
-  needed: number,
-  sessionSecret: string,
-): Promise<ReservedGitHubToken[]> {
-  if (needed <= 0) {
-    return []
-  }
-
-  const reserved: ReservedGitHubToken[] = []
-  let attempts = 0
-
-  while (reserved.length < needed && attempts < SELECT_TOKEN_MAX_ATTEMPTS) {
-    const now = nowSeconds()
-    const cutoff = now - TOKEN_COOLDOWN_SECONDS
-    const stillNeeded = needed - reserved.length
-    const rows = await reserveTokenRows(db, stillNeeded, now, cutoff)
-
-    if (rows.length === 0) {
-      break
-    }
-
-    for (const row of rows) {
-      const stored = row.github_token
-      try {
-        const plaintext = await decryptGitHubToken(stored, sessionSecret, row.user_id)
-        reserved.push({ plaintext, stored, userId: row.user_id })
-        if (reserved.length >= needed) {
-          break
-        }
-      } catch {
-        await quarantineToken(db, stored)
-        attempts++
-      }
-    }
-
-    attempts++
-  }
-
-  return reserved
 }
 
 export async function releaseReservedTokens(db: Drizzle, reserved: ReservedGitHubToken[]) {

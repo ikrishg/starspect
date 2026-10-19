@@ -9,8 +9,9 @@ import * as schema from '../db/schema'
 import { applyD1Migrations } from '../test-fixtures/apply-migrations'
 import { finalizeReservedTokensOnError } from './token-errors'
 import { RequestError } from '@octokit/request-error'
-import { releaseReservedTokens, selectTokens } from './database'
+import { releaseReservedTokens } from './database'
 import { encryptGitHubToken } from './tokens'
+import { reserveUserGitHubToken } from './user-token'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const sessionSecret = () => btoa(String.fromCharCode(...new Uint8Array(32).fill(2)))
@@ -62,7 +63,7 @@ describe('finalizeReservedTokensOnError', () => {
       .set({ lastTokenUseAt: new Date(0), tokenUnusable: false })
       .where(eq(schema.tokens.userId, '401-a'))
 
-    const reserved = await selectTokens(tokenDb, 1, secret)
+    const reserved = [await reserveUserGitHubToken(tokenDb, '401-a', secret)]
     const forbidden = new RequestError('blocked', 403, {
       request: { method: 'GET', url: 'https://api.github.com/repos/o/r', headers: {} },
       response: {
@@ -88,7 +89,7 @@ describe('finalizeReservedTokensOnError', () => {
       .set({ lastTokenUseAt: new Date(0), tokenUnusable: false })
       .where(eq(schema.tokens.userId, '401-a'))
 
-    const reserved = await selectTokens(tokenDb, 1, secret)
+    const reserved = [await reserveUserGitHubToken(tokenDb, '401-a', secret)]
     const busyAt = reserved[0]
     const rateLimited = new RequestError('rate limit', 403, {
       request: { method: 'GET', url: 'https://api.github.com/users/x', headers: {} },
@@ -122,8 +123,10 @@ describe('finalizeReservedTokensOnError', () => {
       .set({ lastTokenUseAt: new Date(0), tokenUnusable: false })
       .where(eq(schema.tokens.userId, '401-b'))
 
-    const reserved = await selectTokens(tokenDb, 2, secret)
-    assert.equal(reserved.length, 2)
+    const reserved = [
+      await reserveUserGitHubToken(tokenDb, '401-a', secret),
+      await reserveUserGitHubToken(tokenDb, '401-b', secret),
+    ]
 
     const unauthorized = new RequestError('Bad credentials', 401, {
       request: { method: 'GET', url: 'https://api.github.com/users/x', headers: {} },

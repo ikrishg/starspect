@@ -9,7 +9,6 @@ import {
 } from './github'
 import { ensureSessionSecret } from './crypto-keys'
 import {
-  countAvailableTokens,
   createRepositoryRelation,
   ensureRepositoryRow,
   fetchExistingRepository,
@@ -20,24 +19,25 @@ import {
   markStargazersSkipped,
   MAX_STARGAZER_FETCH_FAILURES,
   recordStargazerFetchFailure,
-  releaseReservedTokens,
   saveEmptyRepositoryScore,
   saveRepositoryScore,
-  selectTokens,
+  type ReservedGitHubToken,
 } from './database'
 import { isGitHubRateLimitResponse } from './github-errors'
 import {
   finalizeReservedTokensOnError,
   isGitHubTokenUnauthorized,
 } from './token-errors'
-import chunk from 'lodash.chunk'
+import { releaseUserGitHubToken, reserveUserGitHubToken } from './user-token'
 import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '../db/schema'
 import { scoreRepository } from './scoring'
 
 const STARGAZER_LIST_PAGES = Math.ceil(MAX_STARGAZERS_TO_LIST / STARGAZERS_PER_LIST_PAGE)
 const RESERVED_SUBREQUESTS = 6
-const GITHUB_USERS_PER_TOKEN = Math.floor(4096 / GITHUB_HTTP_CALLS_PER_USER)
+
+/** GitHub REST budget per OAuth token per hour (secondary rate limits apply per token). */
+export const GITHUB_TOKEN_HOURLY_REQUEST_BUDGET = 5000
 
 // Per-request subrequest budget: list pages + repo verify + D1/KV/rate-limit overhead + up to
 // MAX_NEW_USERS_PER_REQUEST stargazer profiles at GITHUB_HTTP_CALLS_PER_USER calls each.
@@ -72,10 +72,16 @@ const assertSessionSecretConfigured = (sessionSecret: string) => {
   }
 }
 
+const unauthorizedCheckResponse = () =>
+  new HTTPException(401, {
+    message: 'GitHub token rejected or revoked; sign in with GitHub again',
+  })
+
 export async function score(
   env: AppBindings,
   owner: string,
   repo: string,
+  githubUserId: string,
   deps: ScoreGithubDeps = defaultGithubDeps,
 ) {
   const db = drizzle(env.db, { schema })
@@ -91,26 +97,23 @@ export async function score(
   const previouslyScored = await fetchScoredStargazersForRepository(db, name)
   const skippedStargazers = await fetchSkippedStargazersForRepository(db, name)
 
-  const baseReserved = await selectTokens(db, 1, env.SESSION_SECRET)
-  if (baseReserved.length === 0) {
-    throw new HTTPException(429, {
-      message: 'Not enough GitHub tokens are available for the estimated request count',
-    })
-  }
-
-  const reservedTokens = [...baseReserved]
+  let userToken: ReservedGitHubToken | null = null
+  let retainTokenCooldown = false
   let tokensFinalized = false
 
   try {
-    const metadata = await deps.fetchRepositoryMetadata(owner, repo, baseReserved[0].plaintext)
+    userToken = await reserveUserGitHubToken(db, githubUserId, env.SESSION_SECRET)
+    const accessToken = userToken.plaintext
+
+    const metadata = await deps.fetchRepositoryMetadata(owner, repo, accessToken)
     await ensureRepositoryRow(db, name)
 
     if (metadata.stargazers_count === 0) {
-      await releaseReservedTokens(db, reservedTokens)
+      await releaseUserGitHubToken(db, userToken)
       return saveEmptyRepositoryScore(db, name)
     }
 
-    const sampleListed = await deps.fetchStargazers(owner, repo, baseReserved[0].plaintext)
+    const sampleListed = await deps.fetchStargazers(owner, repo, accessToken)
     const totalStarCount = metadata.stargazers_count
     const sampleSet = new Set(sampleListed)
     const scoredUsernames = new Set(
@@ -133,84 +136,50 @@ export async function score(
 
     const newUsers = sampleListed.filter((stargazer) => !isResolved(stargazer)).slice(0, MAX_NEW_USERS_PER_REQUEST)
 
-    const chunks = chunk(newUsers, GITHUB_USERS_PER_TOKEN)
-    const additionalNeeded = Math.max(0, chunks.length - 1)
-
-    if (additionalNeeded > 0) {
-      const available = await countAvailableTokens(db)
-      if (available < additionalNeeded) {
-        throw new HTTPException(429, {
-          message: 'Not enough GitHub tokens are available for the estimated request count',
-        })
-      }
-
-      const additionalReserved = await selectTokens(db, additionalNeeded, env.SESSION_SECRET)
-      reservedTokens.push(...additionalReserved)
-    }
-
-    if (reservedTokens.length < chunks.length) {
-      throw new HTTPException(429, {
-        message: 'Not enough GitHub tokens are available for the estimated request count',
-      })
-    }
-
     let hadFetchFailures = false
     let hitRateLimit = false
     const unavailableThisRequest: string[] = []
     const scoredUsernameSet = new Set<string>()
     const fetchedUsers: Array<typeof schema.stargazers.$inferSelect> = []
 
-    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-      if (hitRateLimit) {
-        break
+    const settled = await Promise.allSettled(
+      newUsers.map((user) => deps.fetchUser(env.db, accessToken, user)),
+    )
+
+    for (let resultIndex = 0; resultIndex < settled.length; resultIndex++) {
+      const result = settled[resultIndex]
+      const username = newUsers[resultIndex]
+
+      if (result.status === 'fulfilled') {
+        if (result.value) {
+          fetchedUsers.push(result.value)
+          scoredUsernameSet.add(username)
+          await clearStargazerFetchFailure(db, name, username)
+          continue
+        }
+        unavailableThisRequest.push(username)
+        skippedStargazers.add(username)
+        continue
       }
 
-      const userChunk = chunks[chunkIndex]
-      const settled = await Promise.allSettled(
-        userChunk.map((user) =>
-          deps.fetchUser(env.db, reservedTokens[chunkIndex].plaintext, user),
-        ),
-      )
+      if (isGitHubTokenUnauthorized(result.reason)) {
+        await finalizeReservedTokensOnError(db, [userToken], result.reason, userToken)
+        tokensFinalized = true
+        throw unauthorizedCheckResponse()
+      }
 
-      for (let resultIndex = 0; resultIndex < settled.length; resultIndex++) {
-        const result = settled[resultIndex]
-        const username = userChunk[resultIndex]
-
-        if (result.status === 'fulfilled') {
-          if (result.value) {
-            fetchedUsers.push(result.value)
-            scoredUsernameSet.add(username)
-            await clearStargazerFetchFailure(db, name, username)
-            continue
-          }
-          unavailableThisRequest.push(username)
-          skippedStargazers.add(username)
-          continue
-        }
-
-        if (isGitHubTokenUnauthorized(result.reason)) {
-          await finalizeReservedTokensOnError(
-            db,
-            reservedTokens,
-            result.reason,
-            reservedTokens[chunkIndex],
-          )
-          tokensFinalized = true
-          throw result.reason
-        }
-
-        if (isGitHubRateLimitResponse(result.reason)) {
-          hadFetchFailures = true
-          hitRateLimit = true
-          continue
-        }
-
+      if (isGitHubRateLimitResponse(result.reason)) {
         hadFetchFailures = true
-        const failureCount = await recordStargazerFetchFailure(db, name, username)
-        if (failureCount >= MAX_STARGAZER_FETCH_FAILURES) {
-          unavailableThisRequest.push(username)
-          skippedStargazers.add(username)
-        }
+        hitRateLimit = true
+        retainTokenCooldown = true
+        continue
+      }
+
+      hadFetchFailures = true
+      const failureCount = await recordStargazerFetchFailure(db, name, username)
+      if (failureCount >= MAX_STARGAZER_FETCH_FAILURES) {
+        unavailableThisRequest.push(username)
+        skippedStargazers.add(username)
       }
     }
 
@@ -235,10 +204,14 @@ export async function score(
 
     if (totalStarCount > 0 && sampleListed.length === 0) {
       const repositoryStats = scoreRepository(uniqueUsers, totalStarCount)
-      return saveRepositoryScore(db, name, {
+      const saved = await saveRepositoryScore(db, name, {
         ...repositoryStats,
         is_partial: true,
       })
+      if (!retainTokenCooldown && userToken) {
+        await releaseUserGitHubToken(db, userToken)
+      }
+      return saved
     }
 
     const isPartial = hadFetchFailures || hitRateLimit || unresolvedInSample.length > 0
@@ -255,18 +228,30 @@ export async function score(
     }
 
     const repositoryStats = scoreRepository(uniqueUsers, totalStarCount)
-    return saveRepositoryScore(db, name, {
+    const saved = await saveRepositoryScore(db, name, {
       ...repositoryStats,
       is_partial: isPartial,
     })
-  } catch (error) {
-    if (!tokensFinalized) {
-      const unauthorizedToken =
-        isGitHubTokenUnauthorized(error) && reservedTokens.length > 0
-          ? reservedTokens[0]
-          : undefined
-      await finalizeReservedTokensOnError(db, reservedTokens, error, unauthorizedToken)
+
+    if (!retainTokenCooldown && userToken) {
+      await releaseUserGitHubToken(db, userToken)
     }
+
+    return saved
+  } catch (error) {
+    if (userToken && !tokensFinalized) {
+      await finalizeReservedTokensOnError(db, [userToken], error, userToken)
+      tokensFinalized = true
+    }
+
+    if (error instanceof HTTPException) {
+      throw error
+    }
+
+    if (isGitHubTokenUnauthorized(error)) {
+      throw unauthorizedCheckResponse()
+    }
+
     throw error
   }
 }

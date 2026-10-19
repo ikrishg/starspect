@@ -6,6 +6,7 @@ import { score as scoreRepository } from './lib/starscout'
 import { getSession } from './lib/auth'
 import { enforceCheckRateLimit } from './lib/rate-limit'
 import { normalizeGithubRepository } from './lib/github-names'
+import { parseCheckBody } from './lib/check-body'
 
 const MAX_REQUEST_BYTES = 4_096
 
@@ -34,14 +35,19 @@ app.post(
       return c.json({ error: 'Content-Type must be application/json' }, 415)
     }
 
-    let body: { owner?: string; repo?: string }
+    let rawBody: unknown
     try {
-      body = await c.req.json<{ owner?: string; repo?: string }>()
+      rawBody = await c.req.json()
     } catch {
       return c.json({ error: 'Invalid JSON body' }, 400)
     }
 
-    const normalized = normalizeGithubRepository(body.owner ?? '', body.repo ?? '')
+    const parsed = parseCheckBody(rawBody)
+    if (!parsed.ok) {
+      return c.json({ error: parsed.error }, 400)
+    }
+
+    const normalized = normalizeGithubRepository(parsed.value.owner, parsed.value.repo)
     if ('error' in normalized) {
       return c.json({ error: normalized.error }, 400)
     }
@@ -51,6 +57,8 @@ app.post(
     return c.json({
       score: scored.score ?? 0,
       n_stars: scored.n_stars ?? 0,
+      n_scored_stars: scored.n_scored_stars ?? scored.n_stars ?? 0,
+      is_partial: scored.isPartial ?? false,
       n_fake_stars: scored.n_fake_stars ?? 0,
       checkedAt: scored.checkedAt,
     })

@@ -2,9 +2,8 @@ const SESSION_KEY_INFO = 'starspect-session-v1'
 const TOKEN_KEY_INFO = 'starspect-github-token-v1'
 const REQUIRED_SECRET_BYTES = 32
 
-let validatedSecret: string | null = null
-let sessionKeyPromise: Promise<CryptoKey> | null = null
-let tokenKeyPromise: Promise<CryptoKey> | null = null
+const sessionKeyCache = new Map<string, Promise<CryptoKey>>()
+const tokenKeyCache = new Map<string, Promise<CryptoKey>>()
 
 const decodeSecret = (secret: string) => {
   const bytes = Uint8Array.from(atob(secret), (character) => character.charCodeAt(0))
@@ -15,13 +14,7 @@ const decodeSecret = (secret: string) => {
 }
 
 export const ensureSessionSecret = (secret: string) => {
-  if (validatedSecret === secret) {
-    return
-  }
   decodeSecret(secret)
-  validatedSecret = secret
-  sessionKeyPromise = null
-  tokenKeyPromise = null
 }
 
 const deriveAesKey = async (secret: string, info: string) => {
@@ -44,11 +37,19 @@ const deriveAesKey = async (secret: string, info: string) => {
 }
 
 export const getSessionCryptoKey = (secret: string) => {
-  sessionKeyPromise ??= deriveAesKey(secret, SESSION_KEY_INFO)
-  return sessionKeyPromise
+  let promise = sessionKeyCache.get(secret)
+  if (!promise) {
+    promise = deriveAesKey(secret, SESSION_KEY_INFO)
+    sessionKeyCache.set(secret, promise)
+  }
+  return promise
 }
 
 export const getTokenCryptoKey = (secret: string) => {
-  tokenKeyPromise ??= deriveAesKey(secret, TOKEN_KEY_INFO)
-  return tokenKeyPromise
+  let promise = tokenKeyCache.get(secret)
+  if (!promise) {
+    promise = deriveAesKey(secret, TOKEN_KEY_INFO)
+    tokenKeyCache.set(secret, promise)
+  }
+  return promise
 }

@@ -5,7 +5,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy --minify",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings",
-    "compile": "tsc --noEmit",
+    "compile": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "build": "wrangler deploy --dry-run --outdir dist",
     "test": "node --import tsx --test src/**/*.test.ts"
   },
@@ -20,8 +20,8 @@
   },
   "devDependencies": {
     "@types/lodash.chunk": "^4.2.9",
-    "@cloudflare/workers-types": "^4.20251014.0",
     "@types/node": "^25.6.0",
+    "miniflare": "^4.20260424.0",
     "drizzle-kit": "0.31.11",
     "tsx": "^4.20.5",
     "typescript": "5.9.3",

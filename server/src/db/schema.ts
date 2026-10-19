@@ -5,15 +5,18 @@ export const tokens = sqliteTable('tokens', {
   username: text('username').notNull().unique(),
   token: text('github_token').notNull().unique(),
   lastTokenUseAt: int('last_token_use_at', { mode: 'timestamp' }).notNull(),
+  tokenUnusable: int('token_unusable', { mode: 'boolean' }).notNull().default(false),
 })
 
 export const repositories = sqliteTable('repositories', {
   name: text('name').primaryKey(),
   n_stars: int('n_stars'),
+  n_scored_stars: int('n_scored_stars'),
   n_fake_stars: int('n_fake_stars'),
   n_low_activity: int('n_low_activity'),
   n_activity_cluster: int('n_activity_cluster'),
   score: int('score'),
+  isPartial: int('is_partial', { mode: 'boolean' }).notNull().default(false),
   checkedAt: int('checked_at', { mode: 'timestamp' }),
 })
 

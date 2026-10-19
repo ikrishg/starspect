@@ -36,21 +36,26 @@ const authenticityPercent = (score: number | null | undefined) => {
   return score
 }
 
-export function scoreRepository(users: Array<typeof stargazers.$inferSelect>) {
-  const n_stars = users.length
+export function scoreRepository(
+  users: Array<typeof stargazers.$inferSelect>,
+  listedStarCount: number,
+) {
+  const n_scored_stars = users.length
+  const n_stars = listedStarCount
   const n_fake_stars = users.filter((user) => authenticityPercent(user.score) < 50).length
   const n_low_activity = users.filter((user) => user.total_actions < 2).length
   const n_activity_cluster = users.filter((user) => user.n_dates <= 1).length
 
   const score =
-    n_stars === 0
-      ? 100
+    n_scored_stars === 0
+      ? 0
       : Math.round(
-          users.reduce((sum, user) => sum + authenticityPercent(user.score), 0) / n_stars,
+          users.reduce((sum, user) => sum + authenticityPercent(user.score), 0) / n_scored_stars,
         )
 
   return {
     n_stars,
+    n_scored_stars,
     n_fake_stars,
     n_low_activity,
     n_activity_cluster,

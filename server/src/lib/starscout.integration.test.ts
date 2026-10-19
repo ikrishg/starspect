@@ -10,8 +10,9 @@ import { score, type ScoreGithubDeps } from './starscout'
 import { scoreStargazer } from './scoring'
 import { applyD1Migrations } from '../test-fixtures/apply-migrations'
 import { HTTPException } from 'hono/http-exception'
+import { RequestError } from '@octokit/request-error'
 import { encryptGitHubToken } from './tokens'
-import { releaseReservedTokens, selectTokens } from './database'
+import { MAX_STARGAZER_FETCH_FAILURES, releaseReservedTokens, selectTokens } from './database'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -227,6 +228,129 @@ describe('score() integration', () => {
     assert.equal(broken?.tokenUnusable, true)
 
     await releaseReservedTokens(tokenDb, reserved)
+  })
+
+  it('remembers skipped stargazers after the partial cache expires', async () => {
+    const suffix = crypto.randomUUID()
+    const ghosts = Array.from({ length: 10 }, (_, index) => `ghost${index}-${suffix}`)
+    const alice = `alice-${suffix}`
+    const logins = [...ghosts, alice]
+    const testGithub: ScoreGithubDeps = {
+      fetchRepositoryMetadata: async () => ({ stargazers_count: logins.length }),
+      fetchStargazers: async () => logins,
+      fetchUser: async (d1, _token, username) => {
+        if (username !== alice) {
+          return null
+        }
+        const userDb = drizzle(d1, { schema })
+        const user = { ...sampleUser, username }
+        await userDb.insert(schema.stargazers).values(user).onConflictDoUpdate({
+          target: schema.stargazers.username,
+          set: user,
+        })
+        return user
+      },
+    }
+
+    const repoSlug = `stale-${crypto.randomUUID()}`
+    const env = testEnv(db)
+    const roundOne = await score(env, 'stale', repoSlug, testGithub)
+    assert.equal(roundOne.isPartial, true)
+
+    const tokenDb = drizzle(db, { schema })
+    await tokenDb
+      .update(schema.tokens)
+      .set({ lastTokenUseAt: new Date(0) })
+      .where(eq(schema.tokens.userId, '1'))
+    await tokenDb
+      .update(schema.repositories)
+      .set({ checkedAt: new Date(Date.now() - 2.1 * 60 * 60 * 1000) })
+      .where(eq(schema.repositories.name, `stale/${repoSlug}`))
+
+    const roundTwo = await score(env, 'stale', repoSlug, testGithub)
+    assert.equal(roundTwo.isPartial, false)
+    assert.equal(roundTwo.n_scored_stars, 1)
+
+    await tokenDb
+      .update(schema.tokens)
+      .set({ lastTokenUseAt: new Date(0) })
+      .where(eq(schema.tokens.userId, '1'))
+    await tokenDb
+      .update(schema.repositories)
+      .set({ checkedAt: new Date(Date.now() - 2.1 * 60 * 60 * 1000) })
+      .where(eq(schema.repositories.name, `stale/${repoSlug}`))
+
+    const roundThree = await score(env, 'stale', repoSlug, testGithub)
+    assert.equal(roundThree.isPartial, false)
+    assert.equal(roundThree.n_scored_stars, 1)
+  })
+
+  it('quarantines revoked tokens on 401 instead of releasing them', async () => {
+    const secret = sessionSecret()
+    const tokenDb = drizzle(db, { schema })
+    const testGithub: ScoreGithubDeps = {
+      fetchRepositoryMetadata: async () => {
+        throw new RequestError('Bad credentials', 401, {
+          request: { method: 'GET', url: 'https://api.github.com/repos/o/r', headers: {} },
+        })
+      },
+      fetchStargazers: async () => [],
+      fetchUser: async () => null,
+    }
+
+    await assert.rejects(() => score({ ...testEnv(db), SESSION_SECRET: secret }, 'revoked', 'repo', testGithub))
+
+    const [row] = await tokenDb.select().from(schema.tokens).where(eq(schema.tokens.userId, '1'))
+    assert.equal(row.tokenUnusable, true)
+    assert.notEqual(row.lastTokenUseAt?.getTime(), 0)
+  })
+
+  it('marks repeatedly failing stargazers as skipped', async () => {
+    const failing = Array.from({ length: 10 }, (_, index) => `fail${index}`)
+    const testGithub: ScoreGithubDeps = {
+      fetchRepositoryMetadata: async () => ({ stargazers_count: failing.length }),
+      fetchStargazers: async () => failing,
+      fetchUser: async () => {
+        throw new RequestError('server blew up', 500, {
+          request: { method: 'GET', url: 'https://api.github.com/users/x', headers: {} },
+        })
+      },
+    }
+
+    const env = testEnv(db)
+    const failureRepo = `failures-${crypto.randomUUID()}`
+    for (let round = 0; round < MAX_STARGAZER_FETCH_FAILURES; round++) {
+      const tokenDb = drizzle(db, { schema })
+      await tokenDb
+        .update(schema.tokens)
+        .set({ lastTokenUseAt: new Date(0) })
+        .where(eq(schema.tokens.userId, '1'))
+      const result = await score(env, 'failures', failureRepo, testGithub)
+      if (round < MAX_STARGAZER_FETCH_FAILURES - 1) {
+        assert.equal(result.isPartial, true)
+      }
+    }
+
+    const tokenDb = drizzle(db, { schema })
+    await tokenDb
+      .update(schema.tokens)
+      .set({ lastTokenUseAt: new Date(0) })
+      .where(eq(schema.tokens.userId, '1'))
+    const finalResult = await score(env, 'failures', failureRepo, testGithub)
+    assert.equal(finalResult.isPartial, false)
+    assert.equal(finalResult.n_scored_stars, 0)
+  })
+
+  it('marks repos with stars but an empty sample as partial', async () => {
+    const testGithub: ScoreGithubDeps = {
+      fetchRepositoryMetadata: async () => ({ stargazers_count: 3 }),
+      fetchStargazers: async () => [],
+      fetchUser: async () => null,
+    }
+
+    const result = await score(testEnv(db), 'hidden', 'stars', testGithub)
+    assert.equal(result.isPartial, true)
+    assert.equal(result.n_stars, 3)
   })
 
   it('recovers quarantined tokens after re-login style reset', async () => {

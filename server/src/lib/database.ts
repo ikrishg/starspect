@@ -10,6 +10,8 @@ const RELATION_INSERT_BATCH_SIZE = Math.floor(D1_MAX_BOUND_PARAMS / 2)
 const SELECT_TOKEN_MAX_ATTEMPTS = 50
 export const FULL_REPOSITORY_CACHE_MS = 1000 * 60 * 60 * 24 * 365
 export const PARTIAL_REPOSITORY_CACHE_MS = 1000 * 60 * 60
+export const SKIPPED_STARGAZER_TTL_MS = 1000 * 60 * 60 * 24 * 30
+export const MAX_STARGAZER_FETCH_FAILURES = 3
 
 export type ReservedGitHubToken = {
   plaintext: string
@@ -40,7 +42,7 @@ export async function countAvailableTokens(db: Drizzle) {
 export async function quarantineToken(db: Drizzle, stored: string) {
   await db
     .update(schema.tokens)
-    .set({ tokenUnusable: true, lastTokenUseAt: new Date(0) })
+    .set({ tokenUnusable: true, lastTokenUseAt: new Date() })
     .where(eq(schema.tokens.token, stored))
     .execute()
 }
@@ -166,23 +168,27 @@ export async function fetchExistingRepository(db: Drizzle, name: string) {
 }
 
 export async function fetchSkippedStargazersForRepository(db: Drizzle, name: string) {
+  const skippedAfter = new Date(Date.now() - SKIPPED_STARGAZER_TTL_MS)
   const rows = await db
     .select()
     .from(schema.repositorySkippedStargazers)
-    .where(eq(schema.repositorySkippedStargazers.repositoryId, name))
+    .where(
+      and(
+        eq(schema.repositorySkippedStargazers.repositoryId, name),
+        gt(schema.repositorySkippedStargazers.skippedAt, skippedAfter),
+      ),
+    )
     .execute()
 
   return new Set(rows.map((row) => row.stargazerUsername))
 }
 
-export async function markStargazersSkipped(
-  db: Drizzle,
-  name: string,
-  ...usernames: string[]
-) {
+export async function markStargazersSkipped(db: Drizzle, name: string, ...usernames: string[]) {
   if (usernames.length === 0) {
     return
   }
+
+  const skippedAt = new Date()
 
   for (const batch of chunkValues(usernames, RELATION_INSERT_BATCH_SIZE)) {
     await db
@@ -191,11 +197,56 @@ export async function markStargazersSkipped(
         batch.map((username) => ({
           stargazerUsername: username,
           repositoryId: name,
+          skippedAt,
         })),
       )
-      .onConflictDoNothing()
+      .onConflictDoUpdate({
+        target: [
+          schema.repositorySkippedStargazers.repositoryId,
+          schema.repositorySkippedStargazers.stargazerUsername,
+        ],
+        set: { skippedAt },
+      })
       .execute()
   }
+}
+
+export async function recordStargazerFetchFailure(db: Drizzle, name: string, username: string) {
+  const now = new Date()
+  const [existing] = await db
+    .select()
+    .from(schema.repositoryStargazerFailures)
+    .where(
+      and(
+        eq(schema.repositoryStargazerFailures.repositoryId, name),
+        eq(schema.repositoryStargazerFailures.stargazerUsername, username),
+      ),
+    )
+    .execute()
+
+  const failureCount = (existing?.failureCount ?? 0) + 1
+
+  await db
+    .insert(schema.repositoryStargazerFailures)
+    .values({
+      repositoryId: name,
+      stargazerUsername: username,
+      failureCount,
+      lastFailedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [
+        schema.repositoryStargazerFailures.repositoryId,
+        schema.repositoryStargazerFailures.stargazerUsername,
+      ],
+      set: {
+        failureCount,
+        lastFailedAt: now,
+      },
+    })
+    .execute()
+
+  return failureCount
 }
 
 export async function fetchScoredStargazersForRepository(db: Drizzle, name: string) {

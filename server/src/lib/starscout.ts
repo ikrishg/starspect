@@ -17,11 +17,17 @@ import {
   fetchScoredStargazersForRepository,
   fetchSkippedStargazersForRepository,
   markStargazersSkipped,
+  MAX_STARGAZER_FETCH_FAILURES,
+  recordStargazerFetchFailure,
   releaseReservedTokens,
   saveEmptyRepositoryScore,
   saveRepositoryScore,
   selectTokens,
 } from './database'
+import {
+  finalizeReservedTokensOnError,
+  isGitHubTokenUnauthorized,
+} from './token-errors'
 import chunk from 'lodash.chunk'
 import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '../db/schema'
@@ -80,11 +86,8 @@ export async function score(
 
   assertSessionSecretConfigured(env.SESSION_SECRET)
 
-  const partialRow = existingRepository?.[0]?.isPartial ? existingRepository[0] : null
-  const previouslyScored = partialRow ? await fetchScoredStargazersForRepository(db, name) : []
-  const skippedStargazers = partialRow
-    ? await fetchSkippedStargazersForRepository(db, name)
-    : new Set<string>()
+  const previouslyScored = await fetchScoredStargazersForRepository(db, name)
+  const skippedStargazers = await fetchSkippedStargazersForRepository(db, name)
 
   const baseReserved = await selectTokens(db, 1, env.SESSION_SECRET)
   if (baseReserved.length === 0) {
@@ -104,10 +107,12 @@ export async function score(
       return saveEmptyRepositoryScore(db, name)
     }
 
-    const stargazers = await deps.fetchStargazers(owner, repo, baseReserved[0].plaintext)
-    const sampleListed = stargazers
+    const sampleListed = await deps.fetchStargazers(owner, repo, baseReserved[0].plaintext)
     const totalStarCount = metadata.stargazers_count
-    const scoredUsernames = new Set(previouslyScored.map((user) => user.username))
+    const sampleSet = new Set(sampleListed)
+    const scoredUsernames = new Set(
+      previouslyScored.filter((user) => sampleSet.has(user.username)).map((user) => user.username),
+    )
 
     const precomputed = await fetchExistingUsers(
       db,
@@ -115,7 +120,9 @@ export async function score(
     )
 
     for (const user of previouslyScored) {
-      precomputed.set(user.username, user)
+      if (sampleSet.has(user.username)) {
+        precomputed.set(user.username, user)
+      }
     }
 
     const isResolved = (login: string) =>
@@ -146,6 +153,7 @@ export async function score(
 
     let hadFetchFailures = false
     const unavailableThisRequest: string[] = []
+    const scoredUsernameSet = new Set<string>()
 
     const fetchedUsers =
       chunks.length === 0
@@ -159,19 +167,37 @@ export async function score(
                   ),
                 )
 
-                return settled.flatMap((result, resultIndex) => {
+                const chunkResults: Array<typeof schema.stargazers.$inferSelect> = []
+
+                for (let resultIndex = 0; resultIndex < settled.length; resultIndex++) {
+                  const result = settled[resultIndex]
                   const username = userChunk[resultIndex]
+
                   if (result.status === 'fulfilled') {
                     if (result.value) {
-                      return [result.value]
+                      chunkResults.push(result.value)
+                      scoredUsernameSet.add(username)
+                      continue
                     }
                     unavailableThisRequest.push(username)
                     skippedStargazers.add(username)
-                    return []
+                    continue
                   }
+
+                  if (isGitHubTokenUnauthorized(result.reason)) {
+                    await finalizeReservedTokensOnError(db, [reservedTokens[index]], result.reason)
+                    throw result.reason
+                  }
+
                   hadFetchFailures = true
-                  return []
-                })
+                  const failureCount = await recordStargazerFetchFailure(db, name, username)
+                  if (failureCount >= MAX_STARGAZER_FETCH_FAILURES) {
+                    unavailableThisRequest.push(username)
+                    skippedStargazers.add(username)
+                  }
+                }
+
+                return chunkResults
               }),
             )
           ).flat()
@@ -188,14 +214,29 @@ export async function score(
       await createRepositoryRelation(db, name, ...fetchedUsers.map((user) => user.username))
     }
 
-    const unresolvedInSample = sampleListed.filter(
-      (login) =>
-        !uniqueUsers.some((user) => user.username === login) && !skippedStargazers.has(login),
-    )
+    const resolvedInSample = new Set<string>([
+      ...precomputed.keys(),
+      ...scoredUsernameSet,
+      ...skippedStargazers,
+    ])
+    const unresolvedInSample = sampleListed.filter((login) => !resolvedInSample.has(login))
+
+    if (totalStarCount > 0 && sampleListed.length === 0) {
+      const repositoryStats = scoreRepository(uniqueUsers, totalStarCount)
+      return saveRepositoryScore(db, name, {
+        ...repositoryStats,
+        is_partial: true,
+      })
+    }
 
     const isPartial = hadFetchFailures || unresolvedInSample.length > 0
 
-    if (scoredCount === 0 && skippedStargazers.size === 0 && unresolvedInSample.length > 0) {
+    if (
+      scoredCount === 0 &&
+      unresolvedInSample.length > 0 &&
+      skippedStargazers.size === 0 &&
+      !hadFetchFailures
+    ) {
       throw new HTTPException(503, {
         message: 'Could not score any stargazers for this repository yet',
       })
@@ -207,7 +248,7 @@ export async function score(
       is_partial: isPartial,
     })
   } catch (error) {
-    await releaseReservedTokens(db, reservedTokens)
+    await finalizeReservedTokensOnError(db, reservedTokens, error)
     throw error
   }
 }

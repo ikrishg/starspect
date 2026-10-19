@@ -1,6 +1,7 @@
 import { Context, Hono } from 'hono'
 import type { AppBindings } from '../env'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
+import { eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '../db/schema'
 import packageJson from '../../../package.json'
@@ -143,18 +144,27 @@ auth.get('/callback', async (c) => {
     String(id),
   )
 
+  const [existingToken] = await db
+    .select()
+    .from(schema.tokens)
+    .where(eq(schema.tokens.userId, String(id)))
+    .execute()
+
+  const tokenUpdate = {
+    token: encryptedAccessToken,
+    tokenUnusable: false,
+    ...(existingToken?.tokenUnusable ? { lastTokenUseAt: new Date(0) } : {}),
+  }
+
   await db.insert(schema.tokens).values({
     userId: String(id),
     username: login,
     token: encryptedAccessToken,
-    lastTokenUseAt: new Date(0),
+    lastTokenUseAt: existingToken?.lastTokenUseAt ?? new Date(0),
+    tokenUnusable: false,
   }).onConflictDoUpdate({
     target: schema.tokens.userId,
-    set: {
-      token: encryptedAccessToken,
-      tokenUnusable: false,
-      lastTokenUseAt: new Date(0),
-    },
+    set: tokenUpdate,
   })
 
   if (starAction === 'true') {

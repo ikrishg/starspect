@@ -52,10 +52,24 @@ export const stargazersToRepos = sqliteTable(
 export const repositorySkippedStargazers = sqliteTable(
   'repository_skipped_stargazers',
   {
-    stargazerUsername: text('stargazer_username').notNull(),
     repositoryId: text('repository_id')
       .notNull()
       .references(() => repositories.name),
+    stargazerUsername: text('stargazer_username').notNull(),
+    skippedAt: int('skipped_at', { mode: 'timestamp' }).notNull(),
   },
-  (t) => [primaryKey({ columns: [t.stargazerUsername, t.repositoryId] })],
+  (t) => [primaryKey({ columns: [t.repositoryId, t.stargazerUsername] })],
+)
+
+export const repositoryStargazerFailures = sqliteTable(
+  'repository_stargazer_failures',
+  {
+    repositoryId: text('repository_id')
+      .notNull()
+      .references(() => repositories.name),
+    stargazerUsername: text('stargazer_username').notNull(),
+    failureCount: int('failure_count').notNull().default(0),
+    lastFailedAt: int('last_failed_at', { mode: 'timestamp' }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.repositoryId, t.stargazerUsername] })],
 )

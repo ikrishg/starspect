@@ -107,6 +107,7 @@ export async function score(
 
     if (metadata.stargazers_count === 0) {
       await releaseUserGitHubToken(db, userToken)
+      tokensFinalized = true
       return saveEmptyRepositoryScore(db, name)
     }
 

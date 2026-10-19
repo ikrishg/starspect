@@ -141,4 +141,29 @@ describe('finalizeReservedTokensOnError', () => {
     assert.equal(second?.tokenUnusable, false)
     assert.equal(second?.lastTokenUseAt?.getTime(), 0)
   })
+
+  it('releases cooldown when 401 quarantine misses after login swaps ciphertext', async () => {
+    const secret = sessionSecret()
+    const tokenDb = drizzle(db, { schema })
+    await tokenDb
+      .update(schema.tokens)
+      .set({ lastTokenUseAt: new Date(0), tokenUnusable: false })
+      .where(eq(schema.tokens.userId, '401-a'))
+
+    const reserved = await reserveUserGitHubToken(tokenDb, '401-a', secret)
+    const rotated = await encryptGitHubToken('ghp_after_login', secret, '401-a')
+    await tokenDb
+      .update(schema.tokens)
+      .set({ token: rotated })
+      .where(eq(schema.tokens.userId, '401-a'))
+
+    const unauthorized = new RequestError('Bad credentials', 401, {
+      request: { method: 'GET', url: 'https://api.github.com/users/x', headers: {} },
+    })
+
+    await finalizeReservedTokensOnError(tokenDb, [reserved], unauthorized, reserved)
+
+    const again = await reserveUserGitHubToken(tokenDb, '401-a', secret)
+    assert.equal(again.plaintext, 'ghp_after_login')
+  })
 })

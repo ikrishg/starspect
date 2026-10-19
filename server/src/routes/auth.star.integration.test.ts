@@ -7,9 +7,10 @@ import { eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import * as schema from '../db/schema'
 import { applyD1Migrations } from '../test-fixtures/apply-migrations'
-import { auth, starCsrfCookie } from './auth'
+import { auth } from './auth'
 import { encryptGitHubToken } from '../lib/tokens'
-import { encrypt } from '../lib/auth'
+import { decrypt, encrypt } from '../lib/auth'
+import { createStarCsrfToken } from '../lib/star-csrf'
 import { STARSPECT_STAR_TARGET } from '../lib/github-star'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -23,6 +24,62 @@ const bindings = (db: D1Database, sessions: KVNamespace) => ({
   SESSION_SECRET: sessionSecret,
   CHECK_RATE_LIMITER: {} as RateLimit,
 })
+
+const createSession = async (
+  login: string,
+  userId: string,
+  sessionKv: Map<string, string>,
+) => {
+  const expiresAt = Date.now() + 60_000
+  const sessionUuid = crypto.randomUUID()
+  const sessionPayload = await encrypt(
+    [sessionUuid, login, userId, expiresAt].join(':'),
+    sessionSecret,
+  )
+  const sessionToken = `${sessionPayload.iv}.${sessionPayload.data}`
+  sessionKv.set(sessionToken, String(expiresAt))
+  return { sessionToken, sessionUuid, expiresAt }
+}
+
+const starPost = async (
+  db: D1Database,
+  sessionKv: Map<string, string>,
+  options: {
+    sessionToken: string
+    sessionUuid: string
+    origin?: string
+    secFetchSite?: string
+    csrf?: string
+    includeSession?: boolean
+  },
+) => {
+  const csrf =
+    options.csrf ?? (await createStarCsrfToken(sessionSecret, options.sessionUuid))
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  if (options.origin !== undefined) {
+    headers.Origin = options.origin
+  }
+  if (options.secFetchSite !== undefined) {
+    headers['Sec-Fetch-Site'] = options.secFetchSite
+  }
+  if (options.includeSession !== false) {
+    headers.Cookie = `starspect_session=${options.sessionToken}`
+  }
+
+  return auth.fetch(
+    new Request('https://example.com/star', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ csrf }),
+    }),
+    bindings(db, {
+      get: async (key: string) => sessionKv.get(key) ?? null,
+      put: async () => undefined,
+    } as unknown as KVNamespace),
+  )
+}
 
 describe('auth star consent', () => {
   let mf: Miniflare
@@ -95,8 +152,7 @@ describe('auth star consent', () => {
   })
 
   it('stars the repository only after an explicit consent POST', async () => {
-    const secret = sessionSecret
-    const encrypted = await encryptGitHubToken('ghp_consent', secret, '77')
+    const encrypted = await encryptGitHubToken('ghp_consent', sessionSecret, '77')
     const tokenDb = drizzle(db, { schema })
     await tokenDb.insert(schema.tokens).values({
       userId: '77',
@@ -106,15 +162,7 @@ describe('auth star consent', () => {
       tokenUnusable: false,
     })
 
-    const expiresAt = Date.now() + 60_000
-    const sessionPayload = await encrypt(
-      [crypto.randomUUID(), 'consent-user', expiresAt].join(':'),
-      secret,
-    )
-    const sessionToken = `${sessionPayload.iv}.${sessionPayload.data}`
-    sessionKv.set(sessionToken, String(expiresAt))
-
-    const csrf = 'csrf-test-token'
+    const { sessionToken, sessionUuid } = await createSession('consent-user', '77', sessionKv)
     let starCalls = 0
 
     mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -127,25 +175,183 @@ describe('auth star consent', () => {
       return new Response('not found', { status: 404 })
     })
 
-    const response = await auth.fetch(
-      new Request('https://example.com/star', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Origin: 'https://example.com',
-          Cookie: `starspect_session=${sessionToken}; ${starCsrfCookie}=${csrf}`,
-        },
-        body: JSON.stringify({ csrf }),
-      }),
-      bindings(db, {
-        get: async (key: string) => sessionKv.get(key) ?? null,
-        put: async () => undefined,
-      } as unknown as KVNamespace),
-    )
+    const response = await starPost(db, sessionKv, {
+      sessionToken,
+      sessionUuid,
+      origin: 'https://example.com',
+    })
 
     assert.equal(response.status, 200)
     assert.equal(starCalls, 1)
     const body = (await response.json()) as { starred: boolean }
     assert.equal(body.starred, true)
+  })
+
+  it('selects the OAuth token by GitHub user id after a username takeover', async () => {
+    const tokenDb = drizzle(db, { schema })
+    const encryptedA = await encryptGitHubToken('ghp_account_a', sessionSecret, '100')
+    const encryptedB = await encryptGitHubToken('ghp_account_b', sessionSecret, '200')
+
+    await tokenDb.insert(schema.tokens).values({
+      userId: '100',
+      username: 'alice',
+      token: encryptedA,
+      lastTokenUseAt: new Date(0),
+      tokenUnusable: false,
+    })
+
+    mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/login/oauth/access_token')) {
+        return new Response(JSON.stringify({ access_token: 'ghp_account_b' }), { status: 200 })
+      }
+      if (url.includes('api.github.com/user') && !url.includes('/starred/')) {
+        return new Response(JSON.stringify({ id: 200, login: 'alice' }), { status: 200 })
+      }
+      if (url.includes('/user/starred/')) {
+        const authHeader = String(init?.headers && (init.headers as Record<string, string>).Authorization)
+        assert.ok(authHeader.includes('ghp_account_b'))
+        assert.ok(!authHeader.includes('ghp_account_a'))
+        return new Response(null, { status: 200 })
+      }
+      return new Response('not found', { status: 404 })
+    })
+
+    const callbackResponse = await auth.fetch(
+      new Request('https://example.com/callback?code=takeover&state=state-value', {
+        headers: {
+          Cookie: 'oauth_state=state-value; oauth_code_verifier=verifier-value',
+        },
+      }),
+      bindings(db, {
+        get: async () => null,
+        put: async (key: string, value: string) => {
+          sessionKv.set(key, value)
+        },
+      } as unknown as KVNamespace),
+    )
+    assert.equal(callbackResponse.status, 200)
+
+    const rows = await tokenDb.select().from(schema.tokens).execute()
+    const accountA = rows.find((row) => row.userId === '100')
+    const accountB = rows.find((row) => row.userId === '200')
+    assert.equal(accountA?.username, '#100')
+    assert.equal(accountB?.username, 'alice')
+
+    const payload = (await callbackResponse.json()) as { token: string }
+    const separator = payload.token.indexOf('.')
+    const decryptedSession = await decrypt(
+      {
+        iv: payload.token.slice(0, separator),
+        data: payload.token.slice(separator + 1),
+      },
+      sessionSecret,
+    )
+    const [sessionUuid] = decryptedSession.split(':')
+
+    const starResponse = await starPost(db, sessionKv, {
+      sessionToken: payload.token,
+      sessionUuid,
+      origin: 'https://example.com',
+    })
+    assert.equal(starResponse.status, 200)
+  })
+
+  it('rejects legacy three-part session tokens', async () => {
+    const expiresAt = Date.now() + 60_000
+    const legacy = await encrypt([crypto.randomUUID(), 'legacy-user', expiresAt].join(':'), sessionSecret)
+    const legacyToken = `${legacy.iv}.${legacy.data}`
+    sessionKv.set(legacyToken, String(expiresAt))
+
+    const response = await starPost(db, sessionKv, {
+      sessionToken: legacyToken,
+      sessionUuid: crypto.randomUUID(),
+      origin: 'https://example.com',
+    })
+
+    assert.equal(response.status, 401)
+  })
+
+  it('rejects star POST with invalid origin and CSRF combinations', async () => {
+    const encrypted = await encryptGitHubToken('ghp_guard', sessionSecret, '88')
+    const tokenDb = drizzle(db, { schema })
+    await tokenDb.insert(schema.tokens).values({
+      userId: '88',
+      username: 'guard-user',
+      token: encrypted,
+      lastTokenUseAt: new Date(0),
+      tokenUnusable: false,
+    })
+
+    const { sessionToken, sessionUuid } = await createSession('guard-user', '88', sessionKv)
+    const validCsrf = await createStarCsrfToken(sessionSecret, sessionUuid)
+
+    mock.method(globalThis, 'fetch', async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/user/starred/')) {
+        return new Response(null, { status: 200 })
+      }
+      return new Response('not found', { status: 404 })
+    })
+
+    const cases: Array<{ label: string; init: Parameters<typeof starPost>[2]; status: number }> = [
+      {
+        label: 'wrong origin host',
+        init: { sessionToken, sessionUuid, origin: 'https://evil.example.com' },
+        status: 403,
+      },
+      {
+        label: 'http origin mismatch',
+        init: { sessionToken, sessionUuid, origin: 'http://example.com' },
+        status: 403,
+      },
+      {
+        label: 'missing origin',
+        init: { sessionToken, sessionUuid },
+        status: 403,
+      },
+      {
+        label: 'null origin',
+        init: { sessionToken, sessionUuid, origin: 'null' },
+        status: 403,
+      },
+      {
+        label: 'missing csrf',
+        init: {
+          sessionToken,
+          sessionUuid,
+          origin: 'https://example.com',
+          csrf: 'not-a-valid-csrf-token',
+        },
+        status: 403,
+      },
+      {
+        label: 'mismatched csrf',
+        init: {
+          sessionToken,
+          sessionUuid,
+          origin: 'https://example.com',
+          csrf: validCsrf.slice(0, -1) + (validCsrf.endsWith('a') ? 'b' : 'a'),
+        },
+        status: 403,
+      },
+      {
+        label: 'no session',
+        init: { sessionToken, sessionUuid, origin: 'https://example.com', includeSession: false },
+        status: 401,
+      },
+    ]
+
+    for (const testCase of cases) {
+      const response = await starPost(db, sessionKv, testCase.init)
+      assert.equal(response.status, testCase.status, testCase.label)
+    }
+
+    const allowedWithoutOrigin = await starPost(db, sessionKv, {
+      sessionToken,
+      sessionUuid,
+      secFetchSite: 'same-origin',
+    })
+    assert.equal(allowedWithoutOrigin.status, 200)
   })
 })

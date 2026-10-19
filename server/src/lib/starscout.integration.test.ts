@@ -435,6 +435,7 @@ describe('score() integration', () => {
     const env = testEnv(db)
     const result = await score(env, 'throttle', repoSlug, testGithub)
     assert.equal(result.isPartial, true)
+    assert.equal(result.n_scored_stars, 1)
 
     const tokenDb = drizzle(db, { schema })
     const failures = await tokenDb

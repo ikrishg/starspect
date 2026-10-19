@@ -232,7 +232,7 @@ export async function recordStargazerFetchFailure(db: Drizzle, name: string, use
   const staleBeforeSeconds = Math.floor(staleBefore.getTime() / 1000)
   const nowSeconds = Math.floor(now.getTime() / 1000)
 
-  await db.run(sql`
+  const rows = await db.all<{ failure_count: number }>(sql`
     INSERT INTO repository_stargazer_failures (repository_id, stargazer_username, failure_count, last_failed_at)
     VALUES (${name}, ${username}, 1, ${nowSeconds})
     ON CONFLICT (repository_id, stargazer_username) DO UPDATE SET
@@ -241,20 +241,10 @@ export async function recordStargazerFetchFailure(db: Drizzle, name: string, use
         ELSE failure_count + 1
       END,
       last_failed_at = ${nowSeconds}
+    RETURNING failure_count
   `)
 
-  const [row] = await db
-    .select()
-    .from(schema.repositoryStargazerFailures)
-    .where(
-      and(
-        eq(schema.repositoryStargazerFailures.repositoryId, name),
-        eq(schema.repositoryStargazerFailures.stargazerUsername, username),
-      ),
-    )
-    .execute()
-
-  return row?.failureCount ?? 1
+  return rows[0]?.failure_count ?? 1
 }
 
 export async function fetchScoredStargazersForRepository(db: Drizzle, name: string) {
